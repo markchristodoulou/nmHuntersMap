@@ -468,6 +468,39 @@ def detect_file_kind(path: Path) -> str:
     return "unknown"
 
 
+def load_manifest_sources(manifest_path: Path, year: int | None) -> tuple[list[SourceFile], list[str]]:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("manifest must be a JSON object")
+
+    file_entries = payload.get("files")
+    if not isinstance(file_entries, list):
+        raise ValueError("manifest is missing a 'files' list")
+
+    report_pages = payload.get("reportPages")
+    if not isinstance(report_pages, list):
+        report_pages = []
+
+    files: list[SourceFile] = []
+    for idx, entry in enumerate(file_entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+
+        filename = entry.get("filename")
+        if not isinstance(filename, str) or not filename:
+            filename = Path(url.split("?")[0]).name or f"source_{idx}.dat"
+
+        if year and str(year) not in url and str(year) not in filename:
+            continue
+
+        files.append(SourceFile(url=url, filename=filename))
+
+    return files, [str(p) for p in report_pages if isinstance(p, str)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scrape and normalize NM hunt/draw data")
     parser.add_argument("--year", type=int, help="Target year for filtering links and fallback output year")
@@ -482,6 +515,10 @@ def main() -> int:
         help="Only discover/print report pages and source file links (no downloads, no normalization)",
     )
     parser.add_argument("--manifest-out", help="Optional JSON output path for discovered report pages + links")
+    parser.add_argument(
+        "--manifest-in",
+        help="Optional JSON manifest input path (from --manifest-out). Uses listed files as download sources.",
+    )
     parser.add_argument("--raw-dir", default="data/raw", help="Folder for downloaded source files")
     parser.add_argument("--retries", type=int, default=4, help="Network retries per request (default: 4)")
     parser.add_argument("--timeout", type=int, default=60, help="Network timeout in seconds per request (default: 60)")
@@ -510,7 +547,12 @@ def main() -> int:
     if not args.no_download:
         files: list[SourceFile] = []
         report_pages: list[str] = []
-        if args.source_url:
+        if args.manifest_in:
+            manifest_path = Path(args.manifest_in)
+            files, report_pages = load_manifest_sources(manifest_path, args.year)
+            if not files:
+                print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
+        elif args.source_url:
             files = [
                 SourceFile(url=u, filename=Path(u.split("?")[0]).name or f"source_{idx}.dat")
                 for idx, u in enumerate(args.source_url, start=1)
