@@ -97,7 +97,7 @@ Use this when you want to inventory all likely 2024 report files before download
 ```bash
 python3 scripts/fetch_nm_hunt_data.py \
   --year 2024 \
-  --discover-pages-from "https://www.wildlife.state.nm.us/home/hunting/" \
+  --discover-pages-from "https://wildlife.dgf.nm.gov/home/hunting/" \
   --discover-only \
   --manifest-out data/nm_report_manifest.2024.json
 ```

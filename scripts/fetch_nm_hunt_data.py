@@ -29,7 +29,7 @@ from urllib.parse import urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-DEFAULT_INDEX_URL = "https://www.wildlife.state.nm.us/home/hunting/"
+DEFAULT_INDEX_URL = "https://wildlife.dgf.nm.gov/home/hunting/"
 
 # canonical output keys expected by app
 CANONICAL_KEYS = {
