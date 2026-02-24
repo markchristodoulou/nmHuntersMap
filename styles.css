@@ -1,0 +1,133 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f6f7fb;
+  color: #1f2937;
+}
+
+header {
+  background: #0f172a;
+  color: #fff;
+  padding: 1rem 1.25rem;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+
+header p {
+  margin: 0.4rem 0 0;
+  color: #cbd5e1;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  grid-template-areas:
+    "controls map"
+    "details table";
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.panel {
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+  padding: 1rem;
+}
+
+.controls {
+  grid-area: controls;
+}
+
+.map-panel {
+  grid-area: map;
+}
+
+.details {
+  grid-area: details;
+}
+
+.table-panel {
+  grid-area: table;
+}
+
+label {
+  display: block;
+  margin-bottom: 0.85rem;
+  font-weight: 600;
+}
+
+select {
+  display: block;
+  margin-top: 0.35rem;
+  width: 100%;
+  padding: 0.4rem;
+}
+
+.map-note {
+  margin: 0 0 0.6rem;
+  color: #475569;
+  font-size: 0.9rem;
+}
+
+#zoneMap {
+  width: 100%;
+  height: 520px;
+  border: 1px solid #dbe1ea;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.gmu-tooltip {
+  font-size: 0.85rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 0.55rem 0.5rem;
+  border-bottom: 1px solid #e5e7eb;
+  text-align: left;
+}
+
+tbody tr {
+  cursor: pointer;
+}
+
+tbody tr:hover {
+  background: #eff6ff;
+}
+
+tbody tr.active {
+  background: #dbeafe;
+}
+
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "controls"
+      "map"
+      "details"
+      "table";
+  }
+
+  #zoneMap {
+    height: 420px;
+  }
+}
