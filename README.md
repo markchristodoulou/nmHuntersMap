@@ -91,6 +91,8 @@ python3 scripts/fetch_nm_hunt_data.py \
 
 Then point the app to your new output file by replacing the fetch path in `app.js`.
 
+Tip for one-command yearly runs: using only `--year <YYYY>` now accepts filenames/URLs containing that year directly (`2024`) and season ranges (`2023-2024`, `2024-2025`).
+
 ### Discover all report pages/files first (harvest + draw)
 
 Use this when you want to inventory all likely 2024 report files before downloading:
@@ -105,6 +107,32 @@ python3 scripts/fetch_nm_hunt_data.py \
 
 This prints discovered links and tags each as `harvest`, `draw`, or `other` based on URL text.
 If discovery returns direct WordPress `/download/...` URLs, the script now treats those as downloadable files automatically.
+
+Use the saved manifest later to fetch from that fixed set of URLs (skips fresh page scraping). If the manifest file already exists, `--manifest-out` is reused as input:
+
+```bash
+python3 scripts/fetch_nm_hunt_data.py \
+  --year 2024 \
+  --manifest-out data/nm_report_manifest.2024.json \
+  --retries 6 \
+  --timeout 90 \
+  --out data/nm_hunt_data.2024.json
+```
+
+### One command per year (recommended)
+
+For most seasons, this single command is enough:
+
+```bash
+python3 scripts/fetch_nm_hunt_data.py \
+  --year 2024 \
+  --index-url "https://wildlife.dgf.nm.gov/home/hunting/" \
+  --retries 6 \
+  --timeout 90 \
+  --out data/nm_hunt_data.2024.json
+```
+
+The script now tries report-page discovery from `--index-url` first, then scrapes those pages for files; it falls back to direct link scraping if no report pages are found.
 
 ### If column names differ
 

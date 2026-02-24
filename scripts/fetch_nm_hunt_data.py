@@ -139,6 +139,23 @@ def _guess_filename_from_url(url: str, fallback: str) -> str:
     return name or fallback
 
 
+
+
+def _extract_years(text: str) -> set[int]:
+    years = {int(y) for y in re.findall(r"(?<!\d)(20\d{2})(?!\d)", text)}
+    for a, b in re.findall(r"(?<!\d)(20\d{2})\s*[-/]\s*(20\d{2})(?!\d)", text):
+        ya, yb = int(a), int(b)
+        if ya <= yb and yb - ya <= 2:
+            years.update(range(ya, yb + 1))
+    return years
+
+
+def matches_target_year(text: str, year: int | None) -> bool:
+    if year is None:
+        return True
+    years = _extract_years(text)
+    return not years or year in years
+
 def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: int = 45) -> list[SourceFile]:
     html = fetch_text(index_url, retries=retries, timeout=timeout)
     parser = HrefParser()
@@ -154,7 +171,7 @@ def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: 
             continue
 
         filename = _guess_filename_from_url(abs_url.split("?")[0], "downloaded_report")
-        if year and str(year) not in abs_url and str(year) not in filename:
+        if not matches_target_year(f"{abs_url} {filename}", year):
             continue
         out.append(SourceFile(url=abs_url, filename=filename))
     # de-duplicate by URL
@@ -173,7 +190,7 @@ def discover_report_pages(index_url: str, year: int | None, retries: int = 4, ti
         lower_url = abs_url.lower()
         if not any(k in lower_url for k in REPORT_PAGE_KEYWORDS):
             continue
-        if year and str(year) not in abs_url:
+        if not matches_target_year(abs_url, year):
             continue
         pages.append(abs_url)
 
@@ -468,6 +485,39 @@ def detect_file_kind(path: Path) -> str:
     return "unknown"
 
 
+def load_manifest_sources(manifest_path: Path, year: int | None) -> tuple[list[SourceFile], list[str]]:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("manifest must be a JSON object")
+
+    file_entries = payload.get("files")
+    if not isinstance(file_entries, list):
+        raise ValueError("manifest is missing a 'files' list")
+
+    report_pages = payload.get("reportPages")
+    if not isinstance(report_pages, list):
+        report_pages = []
+
+    files: list[SourceFile] = []
+    for idx, entry in enumerate(file_entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+
+        filename = entry.get("filename")
+        if not isinstance(filename, str) or not filename:
+            filename = Path(url.split("?")[0]).name or f"source_{idx}.dat"
+
+        if not matches_target_year(f"{url} {filename}", year):
+            continue
+
+        files.append(SourceFile(url=url, filename=filename))
+
+    return files, [str(p) for p in report_pages if isinstance(p, str)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scrape and normalize NM hunt/draw data")
     parser.add_argument("--year", type=int, help="Target year for filtering links and fallback output year")
@@ -481,7 +531,14 @@ def main() -> int:
         action="store_true",
         help="Only discover/print report pages and source file links (no downloads, no normalization)",
     )
-    parser.add_argument("--manifest-out", help="Optional JSON output path for discovered report pages + links")
+    parser.add_argument(
+        "--manifest-out",
+        help="Optional JSON manifest path. With --discover-only it writes discovery output; otherwise, if this file exists it can be reused as manifest input.",
+    )
+    parser.add_argument(
+        "--manifest-in",
+        help="Optional JSON manifest input path (from --manifest-out). Uses listed files as download sources.",
+    )
     parser.add_argument("--raw-dir", default="data/raw", help="Folder for downloaded source files")
     parser.add_argument("--retries", type=int, default=4, help="Network retries per request (default: 4)")
     parser.add_argument("--timeout", type=int, default=60, help="Network timeout in seconds per request (default: 60)")
@@ -510,7 +567,17 @@ def main() -> int:
     if not args.no_download:
         files: list[SourceFile] = []
         report_pages: list[str] = []
-        if args.source_url:
+        if args.manifest_in:
+            manifest_path = Path(args.manifest_in)
+            files, report_pages = load_manifest_sources(manifest_path, args.year)
+            if not files:
+                print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
+        elif args.manifest_out and not args.discover_only and Path(args.manifest_out).exists():
+            manifest_path = Path(args.manifest_out)
+            files, report_pages = load_manifest_sources(manifest_path, args.year)
+            if not files:
+                print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
+        elif args.source_url:
             files = [
                 SourceFile(url=u, filename=Path(u.split("?")[0]).name or f"source_{idx}.dat")
                 for idx, u in enumerate(args.source_url, start=1)
@@ -548,16 +615,42 @@ def main() -> int:
                 except Exception as err:
                     print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
         else:
-            report_pages = [args.index_url]
+            report_pages = []
             try:
-                files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
-            except Exception as err:
-                files = []
-                print(
-                    f"warning: failed to fetch/parse index page: {err}. "
-                    "Try --source-url for direct files or run with --no-download after saving files manually.",
-                    file=sys.stderr,
+                report_pages = discover_report_pages(
+                    args.index_url,
+                    args.year,
+                    retries=max(1, args.retries),
+                    timeout=max(10, args.timeout),
                 )
+            except Exception:
+                report_pages = []
+
+            if report_pages:
+                for page in report_pages:
+                    if looks_like_direct_download(page):
+                        files.append(
+                            SourceFile(
+                                url=page,
+                                filename=_guess_filename_from_url(page.split("?")[0], "downloaded_report"),
+                            )
+                        )
+                        continue
+                    try:
+                        files.extend(discover_links(page, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout)))
+                    except Exception as err:
+                        print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
+            else:
+                report_pages = [args.index_url]
+                try:
+                    files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
+                except Exception as err:
+                    files = []
+                    print(
+                        f"warning: failed to fetch/parse index page: {err}. "
+                        "Try --source-url for direct files or run with --no-download after saving files manually.",
+                        file=sys.stderr,
+                    )
         # de-dup discovered file URLs
         file_unique: dict[str, SourceFile] = {f.url: f for f in files}
         files = sorted(file_unique.values(), key=lambda s: s.filename.lower())
