@@ -75,6 +75,7 @@ A helper script is included at `scripts/fetch_nm_hunt_data.py` to automate colle
 1. Scrapes a report index page for links to `.csv`, `.json`, `.xlsx`, `.xls`, `.pdf`, and WordPress `/download/...` pages.
 2. Downloads discovered files into `data/raw/<year>/`.
 3. Normalizes CSV/JSON rows to the app schema and writes output JSON.
+4. Detects actual downloaded file types (including WordPress `/download/...` links with no extension) via response headers and magic bytes.
 
 ### Quick start
 
@@ -135,8 +136,12 @@ You can also run once with `--no-download` after files are saved locally to avoi
 
 ### XLSX/PDF note
 
-The script warns if XLS/XLSX or PDF files are found (it does not parse spreadsheets or PDFs directly without extra dependencies).
-Convert spreadsheets to CSV first, then run again with `--no-download`.
+The script now includes built-in parsing for NM draw-odds XLSX files (including files downloaded from the draw pages below).
+It still does **not** parse PDF tables directly. Harvest PDFs should be converted to CSV/JSON first, then re-run with `--no-download`.
+
+Reference pages used for real-file workflow:
+- Draw workflow: `https://wildlife.dgf.nm.gov/hunting/applications-and-draw-information/how-new-mexico-draw-works/`
+- Harvest workflow: `https://wildlife.dgf.nm.gov/hunting/harvest-reporting-information/`
 
 ## Verify commit history
 
