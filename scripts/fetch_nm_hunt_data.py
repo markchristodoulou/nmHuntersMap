@@ -139,6 +139,23 @@ def _guess_filename_from_url(url: str, fallback: str) -> str:
     return name or fallback
 
 
+
+
+def _extract_years(text: str) -> set[int]:
+    years = {int(y) for y in re.findall(r"(?<!\d)(20\d{2})(?!\d)", text)}
+    for a, b in re.findall(r"(?<!\d)(20\d{2})\s*[-/]\s*(20\d{2})(?!\d)", text):
+        ya, yb = int(a), int(b)
+        if ya <= yb and yb - ya <= 2:
+            years.update(range(ya, yb + 1))
+    return years
+
+
+def matches_target_year(text: str, year: int | None) -> bool:
+    if year is None:
+        return True
+    years = _extract_years(text)
+    return not years or year in years
+
 def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: int = 45) -> list[SourceFile]:
     html = fetch_text(index_url, retries=retries, timeout=timeout)
     parser = HrefParser()
@@ -154,7 +171,7 @@ def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: 
             continue
 
         filename = _guess_filename_from_url(abs_url.split("?")[0], "downloaded_report")
-        if year and str(year) not in abs_url and str(year) not in filename:
+        if not matches_target_year(f"{abs_url} {filename}", year):
             continue
         out.append(SourceFile(url=abs_url, filename=filename))
     # de-duplicate by URL
@@ -173,7 +190,7 @@ def discover_report_pages(index_url: str, year: int | None, retries: int = 4, ti
         lower_url = abs_url.lower()
         if not any(k in lower_url for k in REPORT_PAGE_KEYWORDS):
             continue
-        if year and str(year) not in abs_url:
+        if not matches_target_year(abs_url, year):
             continue
         pages.append(abs_url)
 
@@ -493,7 +510,7 @@ def load_manifest_sources(manifest_path: Path, year: int | None) -> tuple[list[S
         if not isinstance(filename, str) or not filename:
             filename = Path(url.split("?")[0]).name or f"source_{idx}.dat"
 
-        if year and str(year) not in url and str(year) not in filename:
+        if not matches_target_year(f"{url} {filename}", year):
             continue
 
         files.append(SourceFile(url=url, filename=filename))
@@ -598,16 +615,42 @@ def main() -> int:
                 except Exception as err:
                     print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
         else:
-            report_pages = [args.index_url]
+            report_pages = []
             try:
-                files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
-            except Exception as err:
-                files = []
-                print(
-                    f"warning: failed to fetch/parse index page: {err}. "
-                    "Try --source-url for direct files or run with --no-download after saving files manually.",
-                    file=sys.stderr,
+                report_pages = discover_report_pages(
+                    args.index_url,
+                    args.year,
+                    retries=max(1, args.retries),
+                    timeout=max(10, args.timeout),
                 )
+            except Exception:
+                report_pages = []
+
+            if report_pages:
+                for page in report_pages:
+                    if looks_like_direct_download(page):
+                        files.append(
+                            SourceFile(
+                                url=page,
+                                filename=_guess_filename_from_url(page.split("?")[0], "downloaded_report"),
+                            )
+                        )
+                        continue
+                    try:
+                        files.extend(discover_links(page, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout)))
+                    except Exception as err:
+                        print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
+            else:
+                report_pages = [args.index_url]
+                try:
+                    files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
+                except Exception as err:
+                    files = []
+                    print(
+                        f"warning: failed to fetch/parse index page: {err}. "
+                        "Try --source-url for direct files or run with --no-download after saving files manually.",
+                        file=sys.stderr,
+                    )
         # de-dup discovered file URLs
         file_unique: dict[str, SourceFile] = {f.url: f for f in files}
         files = sorted(file_unique.values(), key=lambda s: s.filename.lower())
