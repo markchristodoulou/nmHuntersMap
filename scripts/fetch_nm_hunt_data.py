@@ -514,7 +514,10 @@ def main() -> int:
         action="store_true",
         help="Only discover/print report pages and source file links (no downloads, no normalization)",
     )
-    parser.add_argument("--manifest-out", help="Optional JSON output path for discovered report pages + links")
+    parser.add_argument(
+        "--manifest-out",
+        help="Optional JSON manifest path. With --discover-only it writes discovery output; otherwise, if this file exists it can be reused as manifest input.",
+    )
     parser.add_argument(
         "--manifest-in",
         help="Optional JSON manifest input path (from --manifest-out). Uses listed files as download sources.",
@@ -549,6 +552,11 @@ def main() -> int:
         report_pages: list[str] = []
         if args.manifest_in:
             manifest_path = Path(args.manifest_in)
+            files, report_pages = load_manifest_sources(manifest_path, args.year)
+            if not files:
+                print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
+        elif args.manifest_out and not args.discover_only and Path(args.manifest_out).exists():
+            manifest_path = Path(args.manifest_out)
             files, report_pages = load_manifest_sources(manifest_path, args.year)
             if not files:
                 print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)

@@ -106,12 +106,12 @@ python3 scripts/fetch_nm_hunt_data.py \
 This prints discovered links and tags each as `harvest`, `draw`, or `other` based on URL text.
 If discovery returns direct WordPress `/download/...` URLs, the script now treats those as downloadable files automatically.
 
-Use the saved manifest later to fetch from that fixed set of URLs (skips fresh page scraping):
+Use the saved manifest later to fetch from that fixed set of URLs (skips fresh page scraping). If the manifest file already exists, `--manifest-out` is reused as input:
 
 ```bash
 python3 scripts/fetch_nm_hunt_data.py \
   --year 2024 \
-  --manifest-in data/nm_report_manifest.2024.json \
+  --manifest-out data/nm_report_manifest.2024.json \
   --retries 6 \
   --timeout 90 \
   --out data/nm_hunt_data.2024.json
