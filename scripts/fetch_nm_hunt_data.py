@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import re
 import socket
@@ -139,13 +140,30 @@ def _guess_filename_from_url(url: str, fallback: str) -> str:
     return name or fallback
 
 
-def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: int = 45) -> list[SourceFile]:
+
+
+def _extract_years(text: str) -> set[int]:
+    years = {int(y) for y in re.findall(r"(?<!\d)(20\d{2})(?!\d)", text)}
+    for a, b in re.findall(r"(?<!\d)(20\d{2})\s*[-/]\s*(20\d{2})(?!\d)", text):
+        ya, yb = int(a), int(b)
+        if ya <= yb and yb - ya <= 2:
+            years.update(range(ya, yb + 1))
+    return years
+
+
+def matches_target_year(text: str, year: int | None) -> bool:
+    if year is None:
+        return True
+    years = _extract_years(text)
+    return not years or year in years
+
+def discover_links(index_url: str, year: int | None, include_pdf: bool = False, retries: int = 4, timeout: int = 45) -> list[SourceFile]:
     html = fetch_text(index_url, retries=retries, timeout=timeout)
     parser = HrefParser()
     parser.feed(html)
 
     # include explicit data files + wordpress download endpoints that may omit extension
-    supported_ext = (".csv", ".json", ".xlsx", ".xls", ".pdf")
+    supported_ext = (".csv", ".json", ".xlsx", ".xls") + ((".pdf",) if include_pdf else ())
     out: list[SourceFile] = []
     for href in parser.hrefs:
         abs_url = urljoin(index_url, href)
@@ -154,7 +172,7 @@ def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: 
             continue
 
         filename = _guess_filename_from_url(abs_url.split("?")[0], "downloaded_report")
-        if year and str(year) not in abs_url and str(year) not in filename:
+        if not matches_target_year(f"{abs_url} {filename}", year):
             continue
         out.append(SourceFile(url=abs_url, filename=filename))
     # de-duplicate by URL
@@ -173,7 +191,7 @@ def discover_report_pages(index_url: str, year: int | None, retries: int = 4, ti
         lower_url = abs_url.lower()
         if not any(k in lower_url for k in REPORT_PAGE_KEYWORDS):
             continue
-        if year and str(year) not in abs_url:
+        if not matches_target_year(abs_url, year):
             continue
         pages.append(abs_url)
 
@@ -348,6 +366,92 @@ def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, 
     return rows
 
 
+
+
+def _iter_pdf_rows(path: Path) -> list[dict[str, str]]:
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except Exception:
+        print(
+            "warning: pypdf not installed; skipping PDF parsing. Install with: python3 -m pip install pypdf",
+            file=sys.stderr,
+        )
+        return []
+
+    reader = PdfReader(str(path))
+    lines: list[str] = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                lines.append(line)
+
+    if not lines:
+        return []
+
+    header_idx = -1
+    split_mode = ""
+    for idx, line in enumerate(lines):
+        lower = normalize_header(line)
+        if "," in line and any(k in lower for k in ["zone", "unit", "species", "applicants", "permits", "tags", "success"]):
+            header_idx = idx
+            split_mode = "comma"
+            break
+        if re.search(r"\s{2,}", line) and any(k in lower for k in ["zone", "unit", "species", "applicants", "permits", "tags", "success"]):
+            header_idx = idx
+            split_mode = "spaces"
+            break
+
+    if header_idx < 0:
+        return []
+
+    def split_line(line: str) -> list[str]:
+        if split_mode == "comma":
+            return next(csv.reader(io.StringIO(line)))
+        return [c.strip() for c in re.split(r"\s{2,}", line.strip())]
+
+    headers = split_line(lines[header_idx])
+    rows: list[dict[str, str]] = []
+    for line in lines[header_idx + 1 :]:
+        parts = split_line(line)
+        if len(parts) < max(2, len(headers) // 2):
+            continue
+        if len(parts) < len(headers):
+            parts += [""] * (len(headers) - len(parts))
+        if len(parts) > len(headers):
+            parts = parts[: len(headers) - 1] + [" ".join(parts[len(headers) - 1 :])]
+        row = {h: v for h, v in zip(headers, parts, strict=False)}
+        rows.append(row)
+    return rows
+
+
+def normalize_pdf(path: Path, fallback_year: int | None, manual_map: dict[str, str]) -> list[dict[str, Any]]:
+    rows = _iter_pdf_rows(path)
+    if not rows:
+        print(f"skip {path.name}: unable to detect tabular PDF structure", file=sys.stderr)
+        return []
+
+    sample_headers = list(rows[0].keys())
+    inferred = infer_column_map(sample_headers)
+    column_map = {**inferred, **manual_map}
+    missing_core = [k for k in ["zone", "species", "weapon", "drawApplicants", "drawTags", "hunterSuccessRate"] if k not in column_map]
+    if missing_core:
+        print(f"skip {path.name}: PDF table missing mappings for {missing_core}", file=sys.stderr)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for raw in rows:
+        c = canonical_row(raw, column_map, fallback_year)
+        if c:
+            out.append(c)
+
+    if out:
+        print(f"info: parsed {len(out)} rows from PDF {path.name}", file=sys.stderr)
+    else:
+        print(f"skip {path.name}: parsed PDF table but no canonical rows matched", file=sys.stderr)
+    return out
+
 def _xlsx_read_rows(path: Path) -> list[list[str]]:
     ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     rows: list[list[str]] = []
@@ -468,7 +572,7 @@ def detect_file_kind(path: Path) -> str:
     return "unknown"
 
 
-def load_manifest_sources(manifest_path: Path, year: int | None) -> tuple[list[SourceFile], list[str]]:
+def load_manifest_sources(manifest_path: Path, year: int | None, include_pdf: bool = False) -> tuple[list[SourceFile], list[str]]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("manifest must be a JSON object")
@@ -493,7 +597,11 @@ def load_manifest_sources(manifest_path: Path, year: int | None) -> tuple[list[S
         if not isinstance(filename, str) or not filename:
             filename = Path(url.split("?")[0]).name or f"source_{idx}.dat"
 
-        if year and str(year) not in url and str(year) not in filename:
+        if not matches_target_year(f"{url} {filename}", year):
+            continue
+
+        lower = f"{url} {filename}".lower()
+        if not include_pdf and ".pdf" in lower:
             continue
 
         files.append(SourceFile(url=url, filename=filename))
@@ -537,6 +645,11 @@ def main() -> int:
         help="Override mapping with canonical=source pairs, e.g. zone=Unit,species=Species,weapon=Weapon",
     )
     parser.add_argument(
+        "--include-pdf",
+        action="store_true",
+        help="Include PDF links during discovery/manifest replay downloads (default: skip PDFs).",
+    )
+    parser.add_argument(
         "--no-download",
         action="store_true",
         help="Skip scraping/download and only normalize files already in --raw-dir[/year]",
@@ -552,12 +665,12 @@ def main() -> int:
         report_pages: list[str] = []
         if args.manifest_in:
             manifest_path = Path(args.manifest_in)
-            files, report_pages = load_manifest_sources(manifest_path, args.year)
+            files, report_pages = load_manifest_sources(manifest_path, args.year, include_pdf=args.include_pdf)
             if not files:
                 print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
         elif args.manifest_out and not args.discover_only and Path(args.manifest_out).exists():
             manifest_path = Path(args.manifest_out)
-            files, report_pages = load_manifest_sources(manifest_path, args.year)
+            files, report_pages = load_manifest_sources(manifest_path, args.year, include_pdf=args.include_pdf)
             if not files:
                 print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
         elif args.source_url:
@@ -594,20 +707,46 @@ def main() -> int:
                     )
                     continue
                 try:
-                    files.extend(discover_links(page, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout)))
+                    files.extend(discover_links(page, args.year, include_pdf=args.include_pdf, retries=max(1, args.retries), timeout=max(10, args.timeout)))
                 except Exception as err:
                     print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
         else:
-            report_pages = [args.index_url]
+            report_pages = []
             try:
-                files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
-            except Exception as err:
-                files = []
-                print(
-                    f"warning: failed to fetch/parse index page: {err}. "
-                    "Try --source-url for direct files or run with --no-download after saving files manually.",
-                    file=sys.stderr,
+                report_pages = discover_report_pages(
+                    args.index_url,
+                    args.year,
+                    retries=max(1, args.retries),
+                    timeout=max(10, args.timeout),
                 )
+            except Exception:
+                report_pages = []
+
+            if report_pages:
+                for page in report_pages:
+                    if looks_like_direct_download(page):
+                        files.append(
+                            SourceFile(
+                                url=page,
+                                filename=_guess_filename_from_url(page.split("?")[0], "downloaded_report"),
+                            )
+                        )
+                        continue
+                    try:
+                        files.extend(discover_links(page, args.year, include_pdf=args.include_pdf, retries=max(1, args.retries), timeout=max(10, args.timeout)))
+                    except Exception as err:
+                        print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
+            else:
+                report_pages = [args.index_url]
+                try:
+                    files = discover_links(args.index_url, args.year, include_pdf=args.include_pdf, retries=max(1, args.retries), timeout=max(10, args.timeout))
+                except Exception as err:
+                    files = []
+                    print(
+                        f"warning: failed to fetch/parse index page: {err}. "
+                        "Try --source-url for direct files or run with --no-download after saving files manually.",
+                        file=sys.stderr,
+                    )
         # de-dup discovered file URLs
         file_unique: dict[str, SourceFile] = {f.url: f for f in files}
         files = sorted(file_unique.values(), key=lambda s: s.filename.lower())
@@ -662,7 +801,7 @@ def main() -> int:
         )
     if pdf_files:
         print(
-            f"warning: found {len(pdf_files)} PDF files. Convert table data from PDF to CSV/JSON, then re-run with --no-download.",
+            f"info: found {len(pdf_files)} PDF files. Attempting PDF table parsing (requires pypdf for text extraction).",
             file=sys.stderr,
         )
     if unknown_files:
@@ -675,6 +814,8 @@ def main() -> int:
         normalized.extend(normalize_json(f, args.year, manual_map))
     for f in xlsx_files:
         normalized.extend(normalize_draw_odds_xlsx(f, args.year))
+    for f in pdf_files:
+        normalized.extend(normalize_pdf(f, args.year, manual_map))
 
     # de-dup rows
     dedup_key = lambda r: (r["year"], r["zone"], r["species"], r["weapon"], r["drawApplicants"], r["drawTags"], r["hunterSuccessRate"])
