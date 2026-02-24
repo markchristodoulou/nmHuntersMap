@@ -1,0 +1,25 @@
+[
+  {"year":2024,"zone":"2A","species":"Elk","weapon":"Rifle","drawApplicants":150,"drawTags":18,"hunterSuccessRate":34},
+  {"year":2024,"zone":"2B","species":"Elk","weapon":"Rifle","drawApplicants":112,"drawTags":22,"hunterSuccessRate":41},
+  {"year":2024,"zone":"2C","species":"Elk","weapon":"Rifle","drawApplicants":166,"drawTags":16,"hunterSuccessRate":38},
+  {"year":2024,"zone":"16A","species":"Elk","weapon":"Rifle","drawApplicants":214,"drawTags":24,"hunterSuccessRate":45},
+  {"year":2024,"zone":"16B","species":"Elk","weapon":"Rifle","drawApplicants":198,"drawTags":20,"hunterSuccessRate":42},
+
+  {"year":2024,"zone":"2A","species":"Deer","weapon":"Archery","drawApplicants":93,"drawTags":27,"hunterSuccessRate":28},
+  {"year":2024,"zone":"2B","species":"Deer","weapon":"Archery","drawApplicants":87,"drawTags":23,"hunterSuccessRate":31},
+  {"year":2024,"zone":"2C","species":"Deer","weapon":"Archery","drawApplicants":79,"drawTags":18,"hunterSuccessRate":30},
+  {"year":2024,"zone":"16A","species":"Deer","weapon":"Archery","drawApplicants":105,"drawTags":22,"hunterSuccessRate":35},
+  {"year":2024,"zone":"16B","species":"Deer","weapon":"Archery","drawApplicants":98,"drawTags":20,"hunterSuccessRate":33},
+
+  {"year":2023,"zone":"2A","species":"Elk","weapon":"Rifle","drawApplicants":145,"drawTags":19,"hunterSuccessRate":32},
+  {"year":2023,"zone":"2B","species":"Elk","weapon":"Rifle","drawApplicants":109,"drawTags":21,"hunterSuccessRate":40},
+  {"year":2023,"zone":"2C","species":"Elk","weapon":"Rifle","drawApplicants":160,"drawTags":17,"hunterSuccessRate":36},
+  {"year":2023,"zone":"16A","species":"Elk","weapon":"Rifle","drawApplicants":209,"drawTags":23,"hunterSuccessRate":43},
+  {"year":2023,"zone":"16B","species":"Elk","weapon":"Rifle","drawApplicants":194,"drawTags":20,"hunterSuccessRate":41},
+
+  {"year":2023,"zone":"2A","species":"Pronghorn","weapon":"Muzzleloader","drawApplicants":74,"drawTags":15,"hunterSuccessRate":29},
+  {"year":2023,"zone":"2B","species":"Pronghorn","weapon":"Muzzleloader","drawApplicants":68,"drawTags":16,"hunterSuccessRate":35},
+  {"year":2023,"zone":"2C","species":"Pronghorn","weapon":"Muzzleloader","drawApplicants":72,"drawTags":14,"hunterSuccessRate":27},
+  {"year":2023,"zone":"16A","species":"Pronghorn","weapon":"Muzzleloader","drawApplicants":83,"drawTags":13,"hunterSuccessRate":24},
+  {"year":2023,"zone":"16B","species":"Pronghorn","weapon":"Muzzleloader","drawApplicants":77,"drawTags":12,"hunterSuccessRate":26}
+]
