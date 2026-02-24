@@ -9,6 +9,7 @@ service(s), and downloads all features from each layer as GeoJSON.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -20,6 +21,7 @@ DEFAULT_APP_URL = (
     "https://nmdgf.maps.arcgis.com/apps/instant/basic/index.html"
     "?appid=b5e7938d6c164e9fae453326c3b87e35"
 )
+MAX_NAME_LEN = 80
 
 
 def http_get_json(url: str, timeout: int = 60) -> dict[str, Any]:
@@ -72,17 +74,23 @@ def discover_feature_services(config: dict[str, Any]) -> list[str]:
     return sorted(services)
 
 
-def sanitize_name(value: str) -> str:
+def sanitize_name(value: str, max_len: int = MAX_NAME_LEN) -> str:
     value = value.strip() or "layer"
     value = re.sub(r"[^A-Za-z0-9._-]+", "_", value)
-    return value.strip("._") or "layer"
+    value = value.strip("._") or "layer"
+    return value[:max_len].rstrip("._") or "layer"
+
+
+def short_service_tag(service_url: str) -> str:
+    slug = service_url.rstrip("/").split("/")[-2]
+    digest = hashlib.sha1(service_url.encode("utf-8")).hexdigest()[:8]
+    return f"{sanitize_name(slug, max_len=32)}_{digest}"
 
 
 def query_layer_features(service_url: str, layer_id: int) -> dict[str, Any]:
     layer_url = f"{service_url}/{layer_id}"
     query_url = f"{layer_url}/query"
 
-    # First, probe layer metadata for maxRecordCount support.
     layer_meta = http_get_json(f"{layer_url}?f=pjson")
     max_record_count = int(layer_meta.get("maxRecordCount") or 2000)
 
@@ -118,13 +126,16 @@ def query_layer_features(service_url: str, layer_id: int) -> dict[str, Any]:
 
 def export_service_layers(service_url: str, output_dir: Path) -> None:
     metadata = http_get_json(f"{service_url}?f=pjson")
-    service_name = sanitize_name(metadata.get("serviceDescription") or "service")
-    service_dir = output_dir / service_name
+    descriptive_name = sanitize_name(metadata.get("serviceDescription") or "service")
+    service_dir_name = sanitize_name(
+        f"{descriptive_name}_{short_service_tag(service_url)}", max_len=64
+    )
+    service_dir = output_dir / service_dir_name
     service_dir.mkdir(parents=True, exist_ok=True)
 
     for layer in metadata.get("layers", []):
         layer_id = int(layer["id"])
-        layer_name = sanitize_name(layer.get("name", f"layer_{layer_id}"))
+        layer_name = sanitize_name(layer.get("name", f"layer_{layer_id}"), max_len=48)
         outpath = service_dir / f"{layer_id}_{layer_name}.geojson"
 
         print(f"Downloading {service_url}/{layer_id} -> {outpath}")
