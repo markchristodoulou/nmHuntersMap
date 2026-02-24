@@ -4,6 +4,8 @@ const weaponSelect = document.querySelector("#weaponSelect");
 const resultsTable = document.querySelector("#resultsTable");
 const zoneDetails = document.querySelector("#zoneDetails");
 
+const DATA_FILE = "./data/nm_hunt_data.sample.json";
+
 let allRows = [];
 let zoneFeatures = [];
 let selectedZone = null;
@@ -156,7 +158,7 @@ async function initMap() {
 }
 
 async function init() {
-  const response = await fetch("./data/nm_hunt_data.sample.json");
+  const response = await fetch(DATA_FILE);
   allRows = await response.json();
 
   const years = [...new Set(allRows.map((row) => row.year))].sort((a, b) => b - a);
@@ -176,4 +178,4 @@ async function init() {
   refresh();
 }
 
-init();
+init()
