@@ -186,6 +186,12 @@ def classify_source(url: str) -> str:
     return "other"
 
 
+def looks_like_direct_download(url: str) -> bool:
+    lower = url.lower()
+    parsed = urlparse(url)
+    return "/download/" in lower or "wpdmdl=" in (parsed.query or "").lower()
+
+
 def save_sources(files: list[SourceFile], dest_dir: Path, retries: int = 4, timeout: int = 60) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
@@ -396,6 +402,14 @@ def main() -> int:
             if not report_pages:
                 print("warning: no report pages discovered.", file=sys.stderr)
             for page in report_pages:
+                if looks_like_direct_download(page):
+                    files.append(
+                        SourceFile(
+                            url=page,
+                            filename=_guess_filename_from_url(page.split("?")[0], "downloaded_report"),
+                        )
+                    )
+                    continue
                 try:
                     files.extend(discover_links(page, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout)))
                 except Exception as err:

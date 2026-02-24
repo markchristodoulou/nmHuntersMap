@@ -103,6 +103,7 @@ python3 scripts/fetch_nm_hunt_data.py \
 ```
 
 This prints discovered links and tags each as `harvest`, `draw`, or `other` based on URL text.
+If discovery returns direct WordPress `/download/...` URLs, the script now treats those as downloadable files automatically.
 
 ### If column names differ
 
