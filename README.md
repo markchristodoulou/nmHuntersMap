@@ -72,10 +72,11 @@ A helper script is included at `scripts/fetch_nm_hunt_data.py` to automate colle
 
 ### What it does
 
-1. Scrapes a report index page for links to `.csv`, `.json`, `.xlsx`, `.xls`, `.pdf`, and WordPress `/download/...` pages.
+1. Scrapes a report index page for links to `.csv`, `.json`, `.xlsx`, `.xls`, and WordPress `/download/...` pages (PDF optional via `--include-pdf`).
 2. Downloads discovered files into `data/raw/<year>/`.
-3. Normalizes CSV/JSON rows to the app schema and writes output JSON.
-4. Detects actual downloaded file types (including WordPress `/download/...` links with no extension) via response headers and magic bytes.
+3. Normalizes CSV/JSON/XLSX rows to the app schema and writes output JSON.
+4. Attempts PDF table parsing too (install `pypdf` if you use `--include-pdf`).
+5. Detects actual downloaded file types (including WordPress `/download/...` links with no extension) via response headers and magic bytes.
 
 ### Quick start
 
@@ -133,6 +134,8 @@ python3 scripts/fetch_nm_hunt_data.py \
 ```
 
 The script now tries report-page discovery from `--index-url` first, then scrapes those pages for files; it falls back to direct link scraping if no report pages are found.
+
+If you explicitly want PDFs downloaded too, add `--include-pdf` (otherwise they are skipped to avoid PDF-only warnings).
 
 ### If column names differ
 
