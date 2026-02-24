@@ -85,6 +85,15 @@ class HrefParser(HTMLParser):
                 self.hrefs.append(value)
 
 
+REPORT_PAGE_KEYWORDS = (
+    "harvest-report",
+    "draw-report",
+    "draw-odds",
+    "draw-result",
+    "draw-success",
+)
+
+
 def fetch_bytes_with_retry(url: str, timeout: int = 60, retries: int = 4, backoff_s: float = 1.25) -> bytes:
     last_err: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -147,6 +156,34 @@ def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: 
     # de-duplicate by URL
     unique: dict[str, SourceFile] = {item.url: item for item in out}
     return sorted(unique.values(), key=lambda x: x.filename.lower())
+
+
+def discover_report_pages(index_url: str, year: int | None, retries: int = 4, timeout: int = 45) -> list[str]:
+    html = fetch_text(index_url, retries=retries, timeout=timeout)
+    parser = HrefParser()
+    parser.feed(html)
+
+    pages: list[str] = []
+    for href in parser.hrefs:
+        abs_url = urljoin(index_url, href)
+        lower_url = abs_url.lower()
+        if not any(k in lower_url for k in REPORT_PAGE_KEYWORDS):
+            continue
+        if year and str(year) not in abs_url:
+            continue
+        pages.append(abs_url)
+
+    unique_pages = sorted(set(pages))
+    return unique_pages
+
+
+def classify_source(url: str) -> str:
+    u = url.lower()
+    if "harvest" in u:
+        return "harvest"
+    if "draw" in u:
+        return "draw"
+    return "other"
 
 
 def save_sources(files: list[SourceFile], dest_dir: Path, retries: int = 4, timeout: int = 60) -> list[Path]:
@@ -296,6 +333,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Scrape and normalize NM hunt/draw data")
     parser.add_argument("--year", type=int, help="Target year for filtering links and fallback output year")
     parser.add_argument("--index-url", default=DEFAULT_INDEX_URL, help="Page to scrape for downloadable report files")
+    parser.add_argument(
+        "--discover-pages-from",
+        help="Optional page to discover report pages first (e.g. main hunting page), then scrape files from each report page",
+    )
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Only discover/print report pages and source file links (no downloads, no normalization)",
+    )
+    parser.add_argument("--manifest-out", help="Optional JSON output path for discovered report pages + links")
     parser.add_argument("--raw-dir", default="data/raw", help="Folder for downloaded source files")
     parser.add_argument("--retries", type=int, default=4, help="Network retries per request (default: 4)")
     parser.add_argument("--timeout", type=int, default=60, help="Network timeout in seconds per request (default: 60)")
@@ -322,12 +369,39 @@ def main() -> int:
     manual_map = parse_manual_column_map(args.column_map)
 
     if not args.no_download:
+        files: list[SourceFile] = []
+        report_pages: list[str] = []
         if args.source_url:
             files = [
                 SourceFile(url=u, filename=Path(u.split("?")[0]).name or f"source_{idx}.dat")
                 for idx, u in enumerate(args.source_url, start=1)
             ]
+            report_pages = ["(direct --source-url)"]
+        elif args.discover_pages_from:
+            try:
+                report_pages = discover_report_pages(
+                    args.discover_pages_from,
+                    args.year,
+                    retries=max(1, args.retries),
+                    timeout=max(10, args.timeout),
+                )
+            except Exception as err:
+                report_pages = []
+                print(
+                    f"warning: failed to discover report pages: {err}. "
+                    "Try setting --index-url directly to a known report page.",
+                    file=sys.stderr,
+                )
+
+            if not report_pages:
+                print("warning: no report pages discovered.", file=sys.stderr)
+            for page in report_pages:
+                try:
+                    files.extend(discover_links(page, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout)))
+                except Exception as err:
+                    print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
         else:
+            report_pages = [args.index_url]
             try:
                 files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
             except Exception as err:
@@ -337,6 +411,33 @@ def main() -> int:
                     "Try --source-url for direct files or run with --no-download after saving files manually.",
                     file=sys.stderr,
                 )
+        # de-dup discovered file URLs
+        file_unique: dict[str, SourceFile] = {f.url: f for f in files}
+        files = sorted(file_unique.values(), key=lambda s: s.filename.lower())
+
+        if args.discover_only:
+            manifest = {
+                "year": args.year,
+                "source": args.discover_pages_from or args.index_url,
+                "reportPages": report_pages,
+                "files": [
+                    {
+                        "url": f.url,
+                        "filename": f.filename,
+                        "category": classify_source(f.url),
+                    }
+                    for f in files
+                ],
+            }
+            for entry in manifest["files"]:
+                print(f"[{entry['category']}] {entry['url']}")
+            if args.manifest_out:
+                out = Path(args.manifest_out)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+                print(f"manifest: {out}")
+            return 0
+
         if not files:
             print(
                 "No report links discovered on page (CSV/JSON/XLS/XLSX/PDF/download endpoints). "

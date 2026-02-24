@@ -90,6 +90,20 @@ python3 scripts/fetch_nm_hunt_data.py \
 
 Then point the app to your new output file by replacing the fetch path in `app.js`.
 
+### Discover all report pages/files first (harvest + draw)
+
+Use this when you want to inventory all likely 2024 report files before downloading:
+
+```bash
+python3 scripts/fetch_nm_hunt_data.py \
+  --year 2024 \
+  --discover-pages-from "https://www.wildlife.state.nm.us/home/hunting/" \
+  --discover-only \
+  --manifest-out data/nm_report_manifest.2024.json
+```
+
+This prints discovered links and tags each as `harvest`, `draw`, or `other` based on URL text.
+
 ### If column names differ
 
 Use `--column-map` to map source columns to expected keys:
