@@ -178,7 +178,7 @@ If you want a parser tuned specifically to the NM 2024-2025 elk harvest PDF layo
 python3 scripts/parse_elk_harvest_2024.py --out data/nm_elk_harvest_2024.json
 ```
 
-This script targets the official `Elk_Harvest_Report_2024_Corrected.pdf` format and extracts one JSON row per hunt code with elk-specific fields (`huntCode`, `bagLimit`, `estimatedBulls`, `estimatedCows`, etc.) plus compatible app keys (`drawApplicants`, `drawTags`, `hunterSuccessRate`).
+This script targets the official `Elk_Harvest_Report_2024_Corrected.pdf` format and extracts one JSON row per hunt code with elk-specific fields (`gmu`, `type`, `huntCode`, `bagLimit`, `estimatedBulls`, `estimatedCows`, etc.) plus compatible app keys (`drawApplicants`, `drawTags`, `hunterSuccessRate`).
 
 Reference pages used for real-file workflow:
 - Draw workflow: `https://wildlife.dgf.nm.gov/hunting/applications-and-draw-information/how-new-mexico-draw-works/`

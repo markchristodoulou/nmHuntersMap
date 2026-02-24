@@ -7,6 +7,7 @@ Tuned specifically for New Mexico's "Elk_Harvest_Report_2024_Corrected.pdf" layo
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import re
 from pathlib import Path
@@ -17,7 +18,7 @@ DEFAULT_URL = "https://wildlife.dgf.nm.gov/download/2024-2025-elk-harvest-report
 DEFAULT_OUT = "data/nm_elk_harvest_2024.json"
 
 ROW_RE = re.compile(
-    r"^(?P<zone>.*?)\s*"
+    r"^(?P<typeLabel>.*?)\s*"
     r"(?P<huntCode>ELK-\d-\d{3})\s+"
     r"(?P<weapon>archery|muzzleloader|rifle)\s+"
     r"(?P<huntDates>.+?)\s+"
@@ -32,6 +33,7 @@ ROW_RE = re.compile(
     r"(?P<daysHunted>\d+(?:\.\d+)?)\s*$",
     flags=re.IGNORECASE,
 )
+GMU_RE = re.compile(r"\bGMU\s+([0-9]+[A-Z]?)\b", flags=re.IGNORECASE)
 
 
 def fetch_pdf(url: str) -> bytes:
@@ -46,8 +48,6 @@ def extract_lines(pdf_bytes: bytes) -> list[str]:
     except Exception as err:  # pragma: no cover - runtime dependency check
         raise RuntimeError("Missing dependency: pypdf. Install with `python3 -m pip install pypdf`") from err
 
-    import io
-
     reader = PdfReader(io.BytesIO(pdf_bytes))
     lines: list[str] = []
     for page in reader.pages:
@@ -59,42 +59,59 @@ def extract_lines(pdf_bytes: bytes) -> list[str]:
     return lines
 
 
+def _closest_gmu(line_index: int, gmu_markers: list[tuple[int, str]]) -> str | None:
+    if not gmu_markers:
+        return None
+    nearest_i, nearest_gmu = min(gmu_markers, key=lambda item: abs(item[0] - line_index))
+    return nearest_gmu
+
+
 def parse_rows(lines: list[str]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for line in lines:
+    gmu_markers: list[tuple[int, str]] = []
+    for idx, line in enumerate(lines):
+        m = GMU_RE.search(line)
+        if m:
+            gmu_markers.append((idx, m.group(1).upper()))
+
+    for idx, line in enumerate(lines):
         match = ROW_RE.match(line)
         if not match:
             continue
+
         row = match.groupdict()
-        zone = row["zone"].strip()
-        if not zone:
-            zone = "REG"
+        type_label = row["typeLabel"].strip().replace(".", "") or "REG"
+        m_gmu = _closest_gmu(idx, gmu_markers)
 
         licenses_sold = int(row["licensesSold"])
         hunters_reporting = int(row["huntersReporting"])
-        success_rate = float(row["successRate"])
+        estimated_bulls = int(row["estimatedBulls"])
+        estimated_cows = int(row["estimatedCows"])
 
         out.append(
             {
                 "year": 2024,
                 "season": "2024-2025",
                 "species": "Elk",
-                "zone": zone,
+                "zone": m_gmu or type_label,
+                "gmu": m_gmu,
+                "type": type_label,
                 "huntCode": row["huntCode"],
-                "weapon": row["weapon"].lower(),
+                "weapon": row["weapon"].title(),
                 "huntDates": row["huntDates"],
                 "bagLimit": row["bagLimit"],
                 "licensesSold": licenses_sold,
                 "huntersReporting": hunters_reporting,
                 "percentReporting": int(row["percentReporting"]),
-                "hunterSuccessRate": round(success_rate, 2),
-                "estimatedBulls": int(row["estimatedBulls"]),
-                "estimatedCows": int(row["estimatedCows"]),
+                "hunterSuccessRate": float(row["successRate"]),
+                "estimatedBulls": estimated_bulls,
+                "estimatedCows": estimated_cows,
+                "estimatedHarvestTotal": estimated_bulls + estimated_cows,
                 "satisfactionRating": float(row["satisfactionRating"]),
                 "daysHunted": float(row["daysHunted"]),
-                # canonical fields used by the app's generalized schema
+                # app-compatible fields
                 "drawApplicants": licenses_sold,
-                "drawTags": max(1, int(round(licenses_sold * (success_rate / 100.0)))),
+                "drawTags": estimated_bulls + estimated_cows,
             }
         )
     return out
