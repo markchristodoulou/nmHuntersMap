@@ -21,6 +21,7 @@ import socket
 import ssl
 import sys
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -28,6 +29,7 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from zipfile import ZipFile
 
 DEFAULT_INDEX_URL = "https://wildlife.dgf.nm.gov/home/hunting/"
 
@@ -107,7 +109,9 @@ def fetch_bytes_with_retry(url: str, timeout: int = 60, retries: int = 4, backof
                 },
             )
             with urlopen(req, timeout=timeout) as resp:
-                return resp.read()
+                data = resp.read()
+                setattr(fetch_bytes_with_retry, "_last_headers", resp.headers)
+                return data
         except (URLError, HTTPError, TimeoutError, socket.timeout, ConnectionResetError, ssl.SSLError) as err:
             last_err = err
             if attempt == retries:
@@ -200,6 +204,15 @@ def save_sources(files: list[SourceFile], dest_dir: Path, retries: int = 4, time
         target = dest_dir / src.filename
         try:
             data = fetch_bytes(src.url, retries=retries, timeout=timeout)
+            headers = getattr(fetch_bytes_with_retry, "_last_headers", None)
+            if headers:
+                disposition = headers.get("Content-Disposition", "")
+                match = re.search(r'filename="?([^";]+)"?', disposition)
+                if match:
+                    hinted = Path(match.group(1).replace("%20", " ")).name
+                    if Path(src.filename).suffix == "" and Path(hinted).suffix:
+                        target = dest_dir / hinted
+
             target.write_bytes(data)
             saved.append(target)
             print(f"downloaded: {src.url} -> {target}")
@@ -335,6 +348,126 @@ def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, 
     return rows
 
 
+def _xlsx_read_rows(path: Path) -> list[list[str]]:
+    ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rows: list[list[str]] = []
+    with ZipFile(path) as zf:
+        names = zf.namelist()
+        if "xl/sharedStrings.xml" in names:
+            root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+            shared = ["".join(t.text or "" for t in si.findall(".//a:t", ns)) for si in root.findall("a:si", ns)]
+        else:
+            shared = []
+
+        sheets = sorted(n for n in names if n.startswith("xl/worksheets/sheet") and n.endswith(".xml"))
+        for sheet in sheets:
+            sroot = ET.fromstring(zf.read(sheet))
+            for row in sroot.findall(".//a:sheetData/a:row", ns):
+                cells: list[str] = []
+                for c in row.findall("a:c", ns):
+                    value_node = c.find("a:v", ns)
+                    if value_node is None:
+                        cells.append("")
+                        continue
+                    value = value_node.text or ""
+                    if c.attrib.get("t") == "s" and value.isdigit() and int(value) < len(shared):
+                        value = shared[int(value)]
+                    cells.append(value)
+                rows.append(cells)
+    return rows
+
+
+def normalize_draw_odds_xlsx(path: Path, fallback_year: int | None) -> list[dict[str, Any]]:
+    rows = _xlsx_read_rows(path)
+    if not rows:
+        return []
+
+    header_idx = -1
+    for idx, row in enumerate(rows):
+        norm = [normalize_header(c) for c in row]
+        if "hunt" in norm and "unit/description" in norm and "permits" in norm:
+            header_idx = idx
+            break
+    if header_idx < 0:
+        print(f"skip {path.name}: did not find draw-odds header row in xlsx", file=sys.stderr)
+        return []
+
+    header = [normalize_header(c) for c in rows[header_idx]]
+    try:
+        hunt_col = header.index("hunt")
+        unit_col = header.index("unit/description")
+        permits_col = header.index("permits")
+    except ValueError:
+        print(f"skip {path.name}: missing required xlsx columns", file=sys.stderr)
+        return []
+
+    total_apps_col = next((i for i in range(permits_col + 1, len(header)) if header[i] == "t"), None)
+    if total_apps_col is None:
+        print(f"skip {path.name}: unable to infer total-applicants column", file=sys.stderr)
+        return []
+
+    data: list[dict[str, Any]] = []
+    current_species = "Unknown"
+    year = fallback_year
+    for row in rows[header_idx + 1 :]:
+        if not any((c or "").strip() for c in row):
+            continue
+        first = (row[0] if row else "").strip()
+        if first.isalpha() and len(first) > 2 and first.upper() == first:
+            current_species = first.title()
+            continue
+
+        hunt_code = (row[hunt_col] if hunt_col < len(row) else "").strip()
+        unit_text = (row[unit_col] if unit_col < len(row) else "").strip()
+        permits = coerce_number(row[permits_col] if permits_col < len(row) else None)
+        applicants = coerce_number(row[total_apps_col] if total_apps_col < len(row) else None)
+
+        if not hunt_code or permits is None or applicants is None:
+            continue
+
+        zone_match = re.search(r"\bUnit\s+([0-9A-Za-z]+)", unit_text, flags=re.IGNORECASE)
+        zone = zone_match.group(1) if zone_match else (unit_text or hunt_code)
+        if year is None:
+            ymatch = re.search(r"(20\d{2})", path.name)
+            year = int(ymatch.group(1)) if ymatch else None
+        if year is None:
+            continue
+
+        data.append(
+            {
+                "year": int(year),
+                "zone": zone,
+                "species": current_species,
+                "weapon": "Any",
+                "drawApplicants": int(round(applicants)),
+                "drawTags": int(round(permits)),
+                "hunterSuccessRate": 0.0,
+            }
+        )
+
+    if data:
+        print(
+            f"info: {path.name} parsed as draw-odds xlsx; hunterSuccessRate is set to 0.0 until harvest data is merged.",
+            file=sys.stderr,
+        )
+    return data
+
+
+def detect_file_kind(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in {".csv", ".json", ".xlsx", ".xls", ".pdf"}:
+        return ext.lstrip(".")
+
+    head = path.read_bytes()[:8]
+    if head.startswith(b"PK"):
+        return "xlsx"
+    if head.startswith(b"%PDF"):
+        return "pdf"
+    if head.lstrip().startswith((b"{", b"[")):
+        return "json"
+    return "unknown"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scrape and normalize NM hunt/draw data")
     parser.add_argument("--year", type=int, help="Target year for filtering links and fallback output year")
@@ -461,14 +594,20 @@ def main() -> int:
         else:
             save_sources(files, raw_dir, retries=max(1, args.retries), timeout=max(10, args.timeout))
 
-    csv_files = sorted(raw_dir.glob("*.csv"))
-    json_files = sorted(raw_dir.glob("*.json"))
-    xlsx_files = sorted([*raw_dir.glob("*.xlsx"), *raw_dir.glob("*.xls")])
-    pdf_files = sorted(raw_dir.glob("*.pdf"))
+    all_files = sorted([p for p in raw_dir.iterdir() if p.is_file()]) if raw_dir.exists() else []
+    classified: dict[str, list[Path]] = {"csv": [], "json": [], "xlsx": [], "pdf": [], "unknown": []}
+    for p in all_files:
+        classified.setdefault(detect_file_kind(p), []).append(p)
+
+    csv_files = sorted(classified.get("csv", []))
+    json_files = sorted(classified.get("json", []))
+    xlsx_files = sorted(classified.get("xlsx", []))
+    pdf_files = sorted(classified.get("pdf", []))
+    unknown_files = sorted(classified.get("unknown", []))
 
     if xlsx_files:
         print(
-            f"warning: found {len(xlsx_files)} xls/xlsx files. Convert them to CSV then re-run for normalization.",
+            f"info: found {len(xlsx_files)} xls/xlsx files. Attempting built-in draw-odds XLSX parsing when possible.",
             file=sys.stderr,
         )
     if pdf_files:
@@ -476,12 +615,16 @@ def main() -> int:
             f"warning: found {len(pdf_files)} PDF files. Convert table data from PDF to CSV/JSON, then re-run with --no-download.",
             file=sys.stderr,
         )
+    if unknown_files:
+        print(f"warning: skipped {len(unknown_files)} unsupported files: {[p.name for p in unknown_files]}", file=sys.stderr)
 
     normalized: list[dict[str, Any]] = []
     for f in csv_files:
         normalized.extend(normalize_csv(f, args.year, manual_map))
     for f in json_files:
         normalized.extend(normalize_json(f, args.year, manual_map))
+    for f in xlsx_files:
+        normalized.extend(normalize_draw_odds_xlsx(f, args.year))
 
     # de-dup rows
     dedup_key = lambda r: (r["year"], r["zone"], r["species"], r["weapon"], r["drawApplicants"], r["drawTags"], r["hunterSuccessRate"])
