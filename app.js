@@ -178,4 +178,4 @@ async function init() {
   refresh();
 }
 
-init()
+init();

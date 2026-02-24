@@ -17,11 +17,16 @@ import argparse
 import csv
 import json
 import re
+import socket
+import ssl
 import sys
+import time
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_INDEX_URL = "https://www.wildlife.state.nm.us/home/hunting/"
@@ -67,26 +72,75 @@ class SourceFile:
     filename: str
 
 
-def fetch_text(url: str, timeout: int = 30) -> str:
-    req = Request(url, headers={"User-Agent": "nm-hunters-map-data-bot/1.0"})
-    with urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+class HrefParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hrefs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        for key, value in attrs:
+            if key.lower() == "href" and value:
+                self.hrefs.append(value)
 
 
-def fetch_bytes(url: str, timeout: int = 60) -> bytes:
-    req = Request(url, headers={"User-Agent": "nm-hunters-map-data-bot/1.0"})
-    with urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+def fetch_bytes_with_retry(url: str, timeout: int = 60, retries: int = 4, backoff_s: float = 1.25) -> bytes:
+    last_err: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            req = Request(
+                url,
+                headers={
+                    "User-Agent": "nm-hunters-map-data-bot/1.0",
+                    "Connection": "close",
+                    "Accept": "*/*",
+                },
+            )
+            with urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except (URLError, HTTPError, TimeoutError, socket.timeout, ConnectionResetError, ssl.SSLError) as err:
+            last_err = err
+            if attempt == retries:
+                break
+            # small jitter reduces retry stampedes and helps with flaky middleboxes/proxies
+            jitter = 0.15 * attempt
+            sleep_for = backoff_s * (2 ** (attempt - 1)) + jitter
+            print(f"retry {attempt}/{retries} after network error for {url}: {err}", file=sys.stderr)
+            time.sleep(sleep_for)
+
+    raise RuntimeError(f"Failed to fetch {url} after {retries} attempts: {last_err}")
 
 
-def discover_links(index_url: str, year: int | None) -> list[SourceFile]:
-    html = fetch_text(index_url)
-    # finds href="...csv|json|xlsx|xls"
-    hrefs = re.findall(r'href=["\']([^"\']+\.(?:csv|json|xlsx|xls))[^"\']*["\']', html, flags=re.I)
+def fetch_text(url: str, timeout: int = 30, retries: int = 4) -> str:
+    return fetch_bytes_with_retry(url, timeout=timeout, retries=retries).decode("utf-8", errors="replace")
+
+
+def fetch_bytes(url: str, timeout: int = 60, retries: int = 4) -> bytes:
+    return fetch_bytes_with_retry(url, timeout=timeout, retries=retries)
+
+
+def _guess_filename_from_url(url: str, fallback: str) -> str:
+    path = urlparse(url).path
+    name = Path(path).name
+    return name or fallback
+
+
+def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: int = 45) -> list[SourceFile]:
+    html = fetch_text(index_url, retries=retries, timeout=timeout)
+    parser = HrefParser()
+    parser.feed(html)
+
+    # include explicit data files + wordpress download endpoints that may omit extension
+    supported_ext = (".csv", ".json", ".xlsx", ".xls", ".pdf")
     out: list[SourceFile] = []
-    for href in hrefs:
+    for href in parser.hrefs:
         abs_url = urljoin(index_url, href)
-        filename = Path(abs_url.split("?")[0]).name
+        lower_url = abs_url.lower()
+        if not (lower_url.endswith(supported_ext) or "/download/" in lower_url):
+            continue
+
+        filename = _guess_filename_from_url(abs_url.split("?")[0], "downloaded_report")
         if year and str(year) not in abs_url and str(year) not in filename:
             continue
         out.append(SourceFile(url=abs_url, filename=filename))
@@ -95,15 +149,25 @@ def discover_links(index_url: str, year: int | None) -> list[SourceFile]:
     return sorted(unique.values(), key=lambda x: x.filename.lower())
 
 
-def save_sources(files: list[SourceFile], dest_dir: Path) -> list[Path]:
+def save_sources(files: list[SourceFile], dest_dir: Path, retries: int = 4, timeout: int = 60) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
+    failed: list[str] = []
     for src in files:
         target = dest_dir / src.filename
-        data = fetch_bytes(src.url)
-        target.write_bytes(data)
-        saved.append(target)
-        print(f"downloaded: {src.url} -> {target}")
+        try:
+            data = fetch_bytes(src.url, retries=retries, timeout=timeout)
+            target.write_bytes(data)
+            saved.append(target)
+            print(f"downloaded: {src.url} -> {target}")
+        except Exception as err:  # keep going to next file
+            failed.append(src.url)
+            print(f"failed: {src.url} -> {err}", file=sys.stderr)
+
+    if failed:
+        print(f"warning: failed downloads ({len(failed)}):", file=sys.stderr)
+        for u in failed:
+            print(f"  - {u}", file=sys.stderr)
     return saved
 
 
@@ -233,6 +297,14 @@ def main() -> int:
     parser.add_argument("--year", type=int, help="Target year for filtering links and fallback output year")
     parser.add_argument("--index-url", default=DEFAULT_INDEX_URL, help="Page to scrape for downloadable report files")
     parser.add_argument("--raw-dir", default="data/raw", help="Folder for downloaded source files")
+    parser.add_argument("--retries", type=int, default=4, help="Network retries per request (default: 4)")
+    parser.add_argument("--timeout", type=int, default=60, help="Network timeout in seconds per request (default: 60)")
+    parser.add_argument(
+        "--source-url",
+        action="append",
+        default=[],
+        help="Direct downloadable report URL (can be used multiple times); bypasses index scraping when provided",
+    )
     parser.add_argument("--out", help="Output normalized JSON (default: data/nm_hunt_data.<year|merged>.json)")
     parser.add_argument(
         "--column-map",
@@ -250,19 +322,43 @@ def main() -> int:
     manual_map = parse_manual_column_map(args.column_map)
 
     if not args.no_download:
-        files = discover_links(args.index_url, args.year)
-        if not files:
-            print("No CSV/JSON/XLSX report links discovered on page.", file=sys.stderr)
+        if args.source_url:
+            files = [
+                SourceFile(url=u, filename=Path(u.split("?")[0]).name or f"source_{idx}.dat")
+                for idx, u in enumerate(args.source_url, start=1)
+            ]
         else:
-            save_sources(files, raw_dir)
+            try:
+                files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
+            except Exception as err:
+                files = []
+                print(
+                    f"warning: failed to fetch/parse index page: {err}. "
+                    "Try --source-url for direct files or run with --no-download after saving files manually.",
+                    file=sys.stderr,
+                )
+        if not files:
+            print(
+                "No report links discovered on page (CSV/JSON/XLS/XLSX/PDF/download endpoints). "
+                "Try a specific --index-url and/or increase --retries.",
+                file=sys.stderr,
+            )
+        else:
+            save_sources(files, raw_dir, retries=max(1, args.retries), timeout=max(10, args.timeout))
 
     csv_files = sorted(raw_dir.glob("*.csv"))
     json_files = sorted(raw_dir.glob("*.json"))
     xlsx_files = sorted([*raw_dir.glob("*.xlsx"), *raw_dir.glob("*.xls")])
+    pdf_files = sorted(raw_dir.glob("*.pdf"))
 
     if xlsx_files:
         print(
             f"warning: found {len(xlsx_files)} xls/xlsx files. Convert them to CSV then re-run for normalization.",
+            file=sys.stderr,
+        )
+    if pdf_files:
+        print(
+            f"warning: found {len(pdf_files)} PDF files. Convert table data from PDF to CSV/JSON, then re-run with --no-download.",
             file=sys.stderr,
         )
 
