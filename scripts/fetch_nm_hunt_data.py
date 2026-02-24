@@ -17,15 +17,11 @@ import argparse
 import csv
 import json
 import re
-import socket
-import ssl
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
-from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 DEFAULT_INDEX_URL = "https://www.wildlife.state.nm.us/home/hunting/"
@@ -71,30 +67,16 @@ class SourceFile:
     filename: str
 
 
-def fetch_bytes_with_retry(url: str, timeout: int = 60, retries: int = 4, backoff_s: float = 1.25) -> bytes:
-    last_err: Exception | None = None
-    for attempt in range(1, retries + 1):
-        try:
-            req = Request(url, headers={"User-Agent": "nm-hunters-map-data-bot/1.0"})
-            with urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except (URLError, HTTPError, TimeoutError, socket.timeout, ConnectionResetError, ssl.SSLError) as err:
-            last_err = err
-            if attempt == retries:
-                break
-            sleep_for = backoff_s * (2 ** (attempt - 1))
-            print(f"retry {attempt}/{retries} after network error for {url}: {err}", file=sys.stderr)
-            time.sleep(sleep_for)
-
-    raise RuntimeError(f"Failed to fetch {url} after {retries} attempts: {last_err}")
+def fetch_text(url: str, timeout: int = 30) -> str:
+    req = Request(url, headers={"User-Agent": "nm-hunters-map-data-bot/1.0"})
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
 
 
-def fetch_text(url: str, timeout: int = 30, retries: int = 4) -> str:
-    return fetch_bytes_with_retry(url, timeout=timeout, retries=retries).decode("utf-8", errors="replace")
-
-
-def fetch_bytes(url: str, timeout: int = 60, retries: int = 4) -> bytes:
-    return fetch_bytes_with_retry(url, timeout=timeout, retries=retries)
+def fetch_bytes(url: str, timeout: int = 60) -> bytes:
+    req = Request(url, headers={"User-Agent": "nm-hunters-map-data-bot/1.0"})
+    with urlopen(req, timeout=timeout) as resp:
+        return resp.read()
 
 
 def discover_links(index_url: str, year: int | None) -> list[SourceFile]:
@@ -113,25 +95,15 @@ def discover_links(index_url: str, year: int | None) -> list[SourceFile]:
     return sorted(unique.values(), key=lambda x: x.filename.lower())
 
 
-def save_sources(files: list[SourceFile], dest_dir: Path, retries: int = 4) -> list[Path]:
+def save_sources(files: list[SourceFile], dest_dir: Path) -> list[Path]:
     dest_dir.mkdir(parents=True, exist_ok=True)
     saved: list[Path] = []
-    failed: list[str] = []
     for src in files:
         target = dest_dir / src.filename
-        try:
-            data = fetch_bytes(src.url, retries=retries)
-            target.write_bytes(data)
-            saved.append(target)
-            print(f"downloaded: {src.url} -> {target}")
-        except Exception as err:  # keep going to next file
-            failed.append(src.url)
-            print(f"failed: {src.url} -> {err}", file=sys.stderr)
-
-    if failed:
-        print(f"warning: failed downloads ({len(failed)}):", file=sys.stderr)
-        for u in failed:
-            print(f"  - {u}", file=sys.stderr)
+        data = fetch_bytes(src.url)
+        target.write_bytes(data)
+        saved.append(target)
+        print(f"downloaded: {src.url} -> {target}")
     return saved
 
 
@@ -261,7 +233,6 @@ def main() -> int:
     parser.add_argument("--year", type=int, help="Target year for filtering links and fallback output year")
     parser.add_argument("--index-url", default=DEFAULT_INDEX_URL, help="Page to scrape for downloadable report files")
     parser.add_argument("--raw-dir", default="data/raw", help="Folder for downloaded source files")
-    parser.add_argument("--retries", type=int, default=4, help="Network retries per request (default: 4)")
     parser.add_argument("--out", help="Output normalized JSON (default: data/nm_hunt_data.<year|merged>.json)")
     parser.add_argument(
         "--column-map",
@@ -281,9 +252,9 @@ def main() -> int:
     if not args.no_download:
         files = discover_links(args.index_url, args.year)
         if not files:
-            print("No CSV/JSON/XLSX report links discovered on page (or page fetch failed). Try a specific --index-url and/or increase --retries.", file=sys.stderr)
+            print("No CSV/JSON/XLSX report links discovered on page.", file=sys.stderr)
         else:
-            save_sources(files, raw_dir, retries=max(1, args.retries))
+            save_sources(files, raw_dir)
 
     csv_files = sorted(raw_dir.glob("*.csv"))
     json_files = sorted(raw_dir.glob("*.json"))
