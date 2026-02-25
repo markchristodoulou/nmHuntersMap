@@ -30,6 +30,10 @@ function calcMetrics(row) {
   return { drawOdds, combined };
 }
 
+function rowId(row) {
+  return `${row.zone}::${row.huntCode ?? ""}`;
+}
+
 function getFilteredRows() {
   const year = Number(yearSelect.value);
   const species = speciesSelect.value;
