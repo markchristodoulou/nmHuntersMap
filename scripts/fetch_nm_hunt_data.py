@@ -344,22 +344,88 @@ def normalize_csv(path: Path, fallback_year: int | None, manual_map: dict[str, s
     return rows
 
 
+def _extract_json_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if isinstance(payload, dict):
+        for key in ("rows", "data", "results", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [r for r in value if isinstance(r, dict)]
+    return []
+
+
+def _normalize_complete_draw_row(item: dict[str, Any], fallback_year: int | None) -> dict[str, Any] | None:
+    # Supports nested draw report rows shaped like:
+    # {year, species, huntCode, unitDescription, licenses, applicants:{huntTotal:{total}}, ...}
+    hunt_code = str(item.get("huntCode") or "").strip()
+    if not hunt_code:
+        return None
+
+    year_value = coerce_number(item.get("year"))
+    year = int(year_value) if year_value is not None else fallback_year
+    if year is None:
+        return None
+
+    species = str(item.get("species") or "").strip() or "Unknown"
+    unit_description = str(item.get("unitDescription") or "").strip()
+
+    applicants_block = item.get("applicants") if isinstance(item.get("applicants"), dict) else {}
+    hunt_total = applicants_block.get("huntTotal") if isinstance(applicants_block.get("huntTotal"), dict) else {}
+    applicant_total = coerce_number(hunt_total.get("total"))
+    if applicant_total is None:
+        applicant_total = coerce_number(item.get("applicants"))
+
+    licenses = coerce_number(item.get("licenses"))
+    alloc = item.get("allocation") if isinstance(item.get("allocation"), dict) else {}
+    by_res = alloc.get("licensesByResidency") if isinstance(alloc.get("licensesByResidency"), dict) else {}
+    alloc_total = coerce_number(by_res.get("total"))
+
+    tags = alloc_total if alloc_total is not None else licenses
+    applicants = applicant_total if applicant_total is not None else licenses
+    if applicants is None or tags is None:
+        return None
+
+    zone = unit_description or hunt_code
+    if unit_description:
+        unit_match = re.search(r"\bUnits?\s+([^:]+)", unit_description, flags=re.IGNORECASE)
+        if unit_match:
+            zone = unit_match.group(1).strip()
+
+    return {
+        "year": int(year),
+        "zone": zone,
+        "species": species,
+        "weapon": "Any",
+        "drawApplicants": int(round(applicants)),
+        "drawTags": int(round(tags)),
+        "hunterSuccessRate": 0.0,
+    }
+
+
 def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, str]) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
+    payload_rows = _extract_json_rows(payload)
+    if not payload_rows:
         return []
 
-    rows: list[dict[str, Any]] = []
-    if not payload:
-        return rows
+    # Dedicated handler for complete draw-report style JSON rows.
+    if all("huntCode" in row and "applicants" in row for row in payload_rows[: min(10, len(payload_rows))]):
+        out: list[dict[str, Any]] = []
+        for item in payload_rows:
+            c = _normalize_complete_draw_row(item, fallback_year)
+            if c:
+                out.append(c)
+        if out:
+            print(f"info: parsed {len(out)} rows from nested draw-report JSON {path.name}", file=sys.stderr)
+        return out
 
-    sample_headers = list(payload[0].keys()) if isinstance(payload[0], dict) else []
+    rows: list[dict[str, Any]] = []
+    sample_headers = list(payload_rows[0].keys()) if isinstance(payload_rows[0], dict) else []
     inferred = infer_column_map(sample_headers)
     column_map = {**inferred, **manual_map}
 
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
+    for item in payload_rows:
         c = canonical_row(item, column_map, fallback_year)
         if c:
             rows.append(c)

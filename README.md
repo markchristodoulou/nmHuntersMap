@@ -145,6 +145,15 @@ Use `--column-map` to map source columns to expected keys:
 python3 scripts/fetch_nm_hunt_data.py --year 2024 --no-download   --column-map "zone=Unit,species=Species,weapon=Weapon,drawApplicants=Applicants,drawTags=Tags,hunterSuccessRate=Success %"
 ```
 
+### Using a complete draw-report JSON file
+
+If you already exported the full draw report as JSON (with nested `applicants` / `allocation` objects and `huntCode` rows), place it in `data/raw/<year>/` and run:
+
+```bash
+python3 scripts/fetch_nm_hunt_data.py --year 2024 --no-download --out data/nm_hunt_data.2024.json
+```
+
+The normalizer now reads this nested format directly and maps totals into app fields (`drawApplicants`, `drawTags`) with `hunterSuccessRate` set to `0.0` when harvest data is not present.
 
 ### If index-page scraping is unstable
 
