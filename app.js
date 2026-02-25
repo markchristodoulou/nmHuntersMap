@@ -22,7 +22,14 @@ const pct = (value) => (Number.isFinite(value) ? `${value.toFixed(1)}%` : "N/A")
 const fmtNum = (value) => (Number.isFinite(value) ? String(value) : "N/A");
 
 function rowId(row) {
-  return `${row.zone}::${row.huntCode ?? ""}`;
+  const zone = row.zone ?? "";
+  const huntCode = (row.huntCode ?? "").trim();
+  if (huntCode) {
+    return `${zone}::${huntCode}`;
+  }
+  // Fallback identity for rows without hunt code so distinct species/weapon rows
+  // in the same zone do not collide in selection state.
+  return `${zone}::${row.year ?? ""}::${row.species ?? ""}::${row.weapon ?? ""}`;
 }
 
 function rowScore(row) {
@@ -34,10 +41,6 @@ function calcMetrics(row) {
   const drawOdds = hasDrawInputs ? (row.drawTags / row.drawApplicants) * 100 : null;
   const combined = hasDrawInputs ? (drawOdds * row.hunterSuccessRate) / 100 : null;
   return { drawOdds, combined };
-}
-
-function rowId(row) {
-  return `${row.zone}::${row.huntCode ?? ""}`;
 }
 
 function getFilteredRows() {
