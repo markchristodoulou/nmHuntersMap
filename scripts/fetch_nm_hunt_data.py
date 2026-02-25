@@ -487,7 +487,7 @@ def _iter_pdf_rows(path: Path) -> list[dict[str, str]]:
             parts += [""] * (len(headers) - len(parts))
         if len(parts) > len(headers):
             parts = parts[: len(headers) - 1] + [" ".join(parts[len(headers) - 1 :])]
-        row = {h: v for h, v in zip(headers, parts, strict=False)}
+        row = {h: v for h, v in zip(headers, parts)}
         rows.append(row)
     return rows
 
@@ -850,6 +850,22 @@ def main() -> int:
             save_sources(files, raw_dir, retries=max(1, args.retries), timeout=max(10, args.timeout))
 
     all_files = sorted([p for p in raw_dir.iterdir() if p.is_file()]) if raw_dir.exists() else []
+    if args.year and not all_files and raw_base.exists() and raw_base != raw_dir:
+        # Compatibility fallback: if files are stored directly under raw dir (not raw/<year>),
+        # include files that match requested year tokens in filename.
+        year_token = str(args.year)
+        all_files = sorted(
+            [
+                p
+                for p in raw_base.iterdir()
+                if p.is_file() and matches_target_year(p.name, args.year) and year_token in p.name
+            ]
+        )
+        if all_files:
+            print(
+                f"info: using {len(all_files)} year-matching files from {raw_base} (fallback when {raw_dir} is empty)",
+                file=sys.stderr,
+            )
     classified: dict[str, list[Path]] = {"csv": [], "json": [], "xlsx": [], "pdf": [], "unknown": []}
     for p in all_files:
         classified.setdefault(detect_file_kind(p), []).append(p)
