@@ -589,7 +589,6 @@ def merge_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 
-
 def _iter_pdf_rows(path: Path) -> list[dict[str, str]]:
     try:
         from pypdf import PdfReader  # type: ignore
