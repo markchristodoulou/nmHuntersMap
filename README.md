@@ -31,6 +31,7 @@ It is designed so you can load yearly data and quickly answer:
 {
   "year": 2024,
   "zone": "2A",
+  "huntCode": "ELK-1-201",
   "species": "Elk",
   "weapon": "Rifle",
   "drawApplicants": 150,
@@ -59,6 +60,8 @@ Then open `http://localhost:4173`.
 - **Draw odds (%)** = `(drawTags / drawApplicants) * 100`
 - **Hunt success (%)** = `hunterSuccessRate`
 - **Combined chance (%)** = `(draw odds * hunt success) / 100`
+
+`huntCode` is optional but recommended; when present, the web app displays it and uses `(zone + huntCode)` as row identity so rows are not collapsed when similar codes appear across zones.
 
 ## Important note on GMU geometry quality
 

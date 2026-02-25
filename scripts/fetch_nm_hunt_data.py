@@ -43,6 +43,7 @@ CANONICAL_KEYS = {
     "drawApplicants",
     "drawTags",
     "hunterSuccessRate",
+    "huntCode",
 }
 
 # fuzzy mapping from source column names -> canonical schema
@@ -66,6 +67,7 @@ COLUMN_SYNONYMS = {
         "success %",
         "percent success",
     ],
+    "huntCode": ["hunt code", "huntcode", "code", "hunt"],
 }
 
 
@@ -304,6 +306,7 @@ def canonical_row(raw: dict[str, Any], column_map: dict[str, str], fallback_year
     applicants = coerce_number(get("drawApplicants"))
     tags = coerce_number(get("drawTags"))
     success = coerce_number(get("hunterSuccessRate"))
+    hunt_code = get("huntCode")
 
     y = coerce_number(get("year"))
     year = int(y) if y is not None else fallback_year
@@ -313,7 +316,7 @@ def canonical_row(raw: dict[str, Any], column_map: dict[str, str], fallback_year
     if year is None:
         return None
 
-    return {
+    out = {
         "year": int(year),
         "zone": str(zone).strip(),
         "species": str(species).strip(),
@@ -322,6 +325,9 @@ def canonical_row(raw: dict[str, Any], column_map: dict[str, str], fallback_year
         "drawTags": int(round(tags)),
         "hunterSuccessRate": round(float(success), 2),
     }
+    if hunt_code is not None and str(hunt_code).strip():
+        out["huntCode"] = str(hunt_code).strip()
+    return out
 
 
 def normalize_csv(path: Path, fallback_year: int | None, manual_map: dict[str, str]) -> list[dict[str, Any]]:
@@ -395,6 +401,7 @@ def _normalize_complete_draw_row(item: dict[str, Any], fallback_year: int | None
     return {
         "year": int(year),
         "zone": zone,
+        "huntCode": hunt_code,
         "species": species,
         "weapon": "Any",
         "drawApplicants": int(round(applicants)),
@@ -607,6 +614,7 @@ def normalize_draw_odds_xlsx(path: Path, fallback_year: int | None) -> list[dict
             {
                 "year": int(year),
                 "zone": zone,
+                "huntCode": hunt_code,
                 "species": current_species,
                 "weapon": "Any",
                 "drawApplicants": int(round(applicants)),
@@ -900,7 +908,7 @@ def main() -> int:
         normalized.extend(normalize_pdf(f, args.year, manual_map))
 
     # de-dup rows
-    dedup_key = lambda r: (r["year"], r["zone"], r["species"], r["weapon"], r["drawApplicants"], r["drawTags"], r["hunterSuccessRate"])
+    dedup_key = lambda r: (r["year"], r["zone"], r.get("huntCode", ""), r["species"], r["weapon"], r["drawApplicants"], r["drawTags"], r["hunterSuccessRate"])
     unique = {dedup_key(r): r for r in normalized}
     cleaned = sorted(unique.values(), key=lambda r: (r["year"], r["species"], r["weapon"], r["zone"]))
 
