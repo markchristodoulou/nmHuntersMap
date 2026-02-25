@@ -109,9 +109,6 @@ def parse_rows(lines: list[str]) -> list[dict[str, Any]]:
                 "estimatedHarvestTotal": estimated_bulls + estimated_cows,
                 "satisfactionRating": float(row["satisfactionRating"]),
                 "daysHunted": float(row["daysHunted"]),
-                # app-compatible fields
-                "drawApplicants": licenses_sold,
-                "drawTags": estimated_bulls + estimated_cows,
             }
         )
     return out

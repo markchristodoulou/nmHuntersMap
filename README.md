@@ -63,6 +63,8 @@ Then open `http://localhost:4173`.
 
 `huntCode` is optional but recommended; when present, the web app displays it and uses `(zone + huntCode)` as row identity so rows are not collapsed when similar codes appear across zones.
 
+For harvest-only rows (for example elk harvest parser outputs), draw applicants/tags may be absent; in that case the app shows draw/combined metrics as `N/A` while still showing hunt success and licenses sold.
+
 ## Important note on GMU geometry quality
 
 `data/nm_gmu_boundaries.geojson` in this starter is a geospatially placed sample for the included zones so the app works end-to-end on a real basemap.
@@ -190,7 +192,7 @@ If you want a parser tuned specifically to the NM 2024-2025 elk harvest PDF layo
 python3 scripts/parse_elk_harvest_2024.py --out data/nm_elk_harvest_2024.json
 ```
 
-This script targets the official `Elk_Harvest_Report_2024_Corrected.pdf` format and extracts one JSON row per hunt code with elk-specific fields (`gmu`, `type`, `huntCode`, `bagLimit`, `estimatedBulls`, `estimatedCows`, etc.) plus compatible app keys (`drawApplicants`, `drawTags`, `hunterSuccessRate`).
+This script targets the official `Elk_Harvest_Report_2024_Corrected.pdf` format and extracts one JSON row per hunt code with elk-specific fields (`gmu`, `type`, `huntCode`, `bagLimit`, `licensesSold`, `estimatedBulls`, `estimatedCows`, `hunterSuccessRate`, etc.). It intentionally does not invent `drawApplicants`/`drawTags` for harvest-only data.
 
 Reference pages used for real-file workflow:
 - Draw workflow: `https://wildlife.dgf.nm.gov/hunting/applications-and-draw-information/how-new-mexico-draw-works/`

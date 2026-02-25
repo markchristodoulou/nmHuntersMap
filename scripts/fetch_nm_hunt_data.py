@@ -410,6 +410,53 @@ def _normalize_complete_draw_row(item: dict[str, Any], fallback_year: int | None
     }
 
 
+def _normalize_harvest_row(item: dict[str, Any], fallback_year: int | None) -> dict[str, Any] | None:
+    # Supports harvest parser rows where draw applicants are unknown.
+    year_value = coerce_number(item.get("year"))
+    year = int(year_value) if year_value is not None else fallback_year
+    if year is None:
+        return None
+
+    zone = str(item.get("zone") or item.get("gmu") or "").strip()
+    species = str(item.get("species") or "").strip() or "Unknown"
+    weapon = str(item.get("weapon") or "").strip() or "Any"
+    success = coerce_number(item.get("hunterSuccessRate"))
+
+    if not zone or success is None:
+        return None
+
+    out: dict[str, Any] = {
+        "year": int(year),
+        "zone": zone,
+        "species": species,
+        "weapon": weapon,
+        "hunterSuccessRate": round(float(success), 2),
+    }
+
+    passthrough = [
+        "season",
+        "gmu",
+        "type",
+        "huntCode",
+        "huntDates",
+        "bagLimit",
+        "licensesSold",
+        "huntersReporting",
+        "percentReporting",
+        "estimatedBulls",
+        "estimatedCows",
+        "estimatedHarvestTotal",
+        "satisfactionRating",
+        "daysHunted",
+    ]
+    for key in passthrough:
+        value = item.get(key)
+        if value is not None and value != "":
+            out[key] = value
+
+    return out
+
+
 def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, str]) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload_rows = _extract_json_rows(payload)
@@ -436,6 +483,14 @@ def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, 
         c = canonical_row(item, column_map, fallback_year)
         if c:
             rows.append(c)
+            continue
+
+        harvest_row = _normalize_harvest_row(item, fallback_year)
+        if harvest_row:
+            rows.append(harvest_row)
+
+    if rows and any("licensesSold" in r and "drawApplicants" not in r for r in rows):
+        print(f"info: parsed {len(rows)} rows from harvest-style JSON {path.name}", file=sys.stderr)
     return rows
 
 
@@ -908,7 +963,7 @@ def main() -> int:
         normalized.extend(normalize_pdf(f, args.year, manual_map))
 
     # de-dup rows
-    dedup_key = lambda r: (r["year"], r["zone"], r.get("huntCode", ""), r["species"], r["weapon"], r["drawApplicants"], r["drawTags"], r["hunterSuccessRate"])
+    dedup_key = lambda r: (r.get("year"), r.get("zone"), r.get("huntCode", ""), r.get("species"), r.get("weapon"), r.get("drawApplicants"), r.get("drawTags"), r.get("licensesSold"), r.get("hunterSuccessRate"))
     unique = {dedup_key(r): r for r in normalized}
     cleaned = sorted(unique.values(), key=lambda r: (r["year"], r["species"], r["weapon"], r["zone"]))
 
