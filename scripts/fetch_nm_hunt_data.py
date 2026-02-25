@@ -502,6 +502,92 @@ def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, 
     return rows
 
 
+def _normalize_merge_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).lower()
+
+
+def _merge_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    # Prefer hunt-level identity when a hunt code is present. This prevents
+    # duplicate points for the same zone + hunt tag coming from multiple files.
+    year = row.get("year")
+    zone = _normalize_merge_text(row.get("zone"))
+    hunt_code = _normalize_merge_text(row.get("huntCode"))
+    if hunt_code:
+        return (year, zone, hunt_code)
+
+    # Fallback for rows that do not have hunt codes.
+    species = _normalize_merge_text(row.get("species"))
+    weapon = _normalize_merge_text(row.get("weapon"))
+    return (year, zone, species, weapon)
+
+
+def _is_empty(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _prefer_new_string(current: Any, new: Any) -> bool:
+    if _is_empty(new):
+        return False
+    if _is_empty(current):
+        return True
+    current_s = str(current).strip()
+    new_s = str(new).strip()
+    if current_s.lower() == "any" and new_s.lower() != "any":
+        return True
+    if current_s.lower() == "unknown" and new_s.lower() != "unknown":
+        return True
+    return len(new_s) > len(current_s)
+
+
+def merge_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    numeric_max_keys = {
+        "drawApplicants",
+        "drawTags",
+        "licensesSold",
+        "huntersReporting",
+        "percentReporting",
+        "estimatedBulls",
+        "estimatedCows",
+        "estimatedHarvestTotal",
+        "hunterSuccessRate",
+        "satisfactionRating",
+        "daysHunted",
+    }
+
+    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for row in rows:
+        key = _merge_key(row)
+        if key not in merged:
+            merged[key] = dict(row)
+            continue
+
+        existing = merged[key]
+        for field, value in row.items():
+            if _is_empty(value):
+                continue
+
+            current = existing.get(field)
+            if _is_empty(current):
+                existing[field] = value
+                continue
+
+            if field in numeric_max_keys:
+                incoming = coerce_number(value)
+                present = coerce_number(current)
+                if incoming is not None and (present is None or incoming > present):
+                    existing[field] = value
+                continue
+
+            if isinstance(value, str) and _prefer_new_string(current, value):
+                existing[field] = value
+
+    return list(merged.values())
+
+
 
 
 def _iter_pdf_rows(path: Path) -> list[dict[str, str]]:
@@ -970,10 +1056,10 @@ def main() -> int:
     for f in pdf_files:
         normalized.extend(normalize_pdf(f, args.year, manual_map))
 
-    # de-dup rows
-    dedup_key = lambda r: (r.get("year"), r.get("zone"), r.get("huntCode", ""), r.get("species"), r.get("weapon"), r.get("drawApplicants"), r.get("drawTags"), r.get("licensesSold"), r.get("hunterSuccessRate"))
-    unique = {dedup_key(r): r for r in normalized}
-    cleaned = sorted(unique.values(), key=lambda r: (r["year"], r["species"], r["weapon"], r["zone"]))
+    cleaned = sorted(
+        merge_rows(normalized),
+        key=lambda r: (r.get("year", 0), str(r.get("species", "")), str(r.get("weapon", "")), str(r.get("zone", ""))),
+    )
 
     suffix = str(args.year) if args.year else "merged"
     out_path = Path(args.out) if args.out else Path(f"data/nm_hunt_data.{suffix}.json")
