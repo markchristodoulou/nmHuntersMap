@@ -55,6 +55,8 @@ python3 -m http.server 4173
 
 Then open `http://localhost:4173`.
 
+The app automatically tries these data files in order and uses the first one that exists and has rows: `data/nm_hunt_data.2026.json`, `data/nm_hunt_data.2025.json`, `data/nm_hunt_data.2024.json`, `data/nm_hunt_data.merged.json`, then `data/nm_hunt_data.sample.json`.
+
 ## Calculations
 
 - **Draw odds (%)** = `(drawTags / drawApplicants) * 100`

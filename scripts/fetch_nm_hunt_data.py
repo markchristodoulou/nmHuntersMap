@@ -480,6 +480,14 @@ def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, 
     column_map = {**inferred, **manual_map}
 
     for item in payload_rows:
+        # Prefer harvest mapping when harvest-specific fields are present so we retain
+        # full harvest context instead of collapsing to draw-only canonical fields.
+        if "licensesSold" in item or "estimatedHarvestTotal" in item:
+            harvest_row = _normalize_harvest_row(item, fallback_year)
+            if harvest_row:
+                rows.append(harvest_row)
+                continue
+
         c = canonical_row(item, column_map, fallback_year)
         if c:
             rows.append(c)

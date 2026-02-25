@@ -4,7 +4,13 @@ const weaponSelect = document.querySelector("#weaponSelect");
 const resultsTable = document.querySelector("#resultsTable");
 const zoneDetails = document.querySelector("#zoneDetails");
 
-const DATA_FILE = "./data/nm_hunt_data.sample.json";
+const DATA_FILES = [
+  "./data/nm_hunt_data.2026.json",
+  "./data/nm_hunt_data.2025.json",
+  "./data/nm_hunt_data.2024.json",
+  "./data/nm_hunt_data.merged.json",
+  "./data/nm_hunt_data.sample.json",
+];
 
 let allRows = [];
 let zoneFeatures = [];
@@ -180,9 +186,29 @@ async function initMap() {
   initialLayer.remove();
 }
 
+async function loadRows() {
+  for (const path of DATA_FILES) {
+    try {
+      const response = await fetch(path);
+      if (!response.ok) continue;
+      const rows = await response.json();
+      if (Array.isArray(rows) && rows.length) {
+        console.info(`Loaded data from ${path} (${rows.length} rows)`);
+        return rows;
+      }
+    } catch {
+      // Try next candidate file.
+    }
+  }
+  return [];
+}
+
 async function init() {
-  const response = await fetch(DATA_FILE);
-  allRows = await response.json();
+  allRows = await loadRows();
+  if (!allRows.length) {
+    zoneDetails.innerHTML = "No data rows were found. Add a file like data/nm_hunt_data.2024.json.";
+    return;
+  }
 
   const years = [...new Set(allRows.map((row) => row.year))].sort((a, b) => b - a);
   const species = [...new Set(allRows.map((row) => row.species))].sort();
