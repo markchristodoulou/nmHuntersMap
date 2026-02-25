@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import json
 import re
 import socket
@@ -42,6 +43,7 @@ CANONICAL_KEYS = {
     "drawApplicants",
     "drawTags",
     "hunterSuccessRate",
+    "huntCode",
 }
 
 # fuzzy mapping from source column names -> canonical schema
@@ -65,6 +67,7 @@ COLUMN_SYNONYMS = {
         "success %",
         "percent success",
     ],
+    "huntCode": ["hunt code", "huntcode", "code", "hunt"],
 }
 
 
@@ -139,13 +142,30 @@ def _guess_filename_from_url(url: str, fallback: str) -> str:
     return name or fallback
 
 
-def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: int = 45) -> list[SourceFile]:
+
+
+def _extract_years(text: str) -> set[int]:
+    years = {int(y) for y in re.findall(r"(?<!\d)(20\d{2})(?!\d)", text)}
+    for a, b in re.findall(r"(?<!\d)(20\d{2})\s*[-/]\s*(20\d{2})(?!\d)", text):
+        ya, yb = int(a), int(b)
+        if ya <= yb and yb - ya <= 2:
+            years.update(range(ya, yb + 1))
+    return years
+
+
+def matches_target_year(text: str, year: int | None) -> bool:
+    if year is None:
+        return True
+    years = _extract_years(text)
+    return not years or year in years
+
+def discover_links(index_url: str, year: int | None, include_pdf: bool = False, retries: int = 4, timeout: int = 45) -> list[SourceFile]:
     html = fetch_text(index_url, retries=retries, timeout=timeout)
     parser = HrefParser()
     parser.feed(html)
 
     # include explicit data files + wordpress download endpoints that may omit extension
-    supported_ext = (".csv", ".json", ".xlsx", ".xls", ".pdf")
+    supported_ext = (".csv", ".json", ".xlsx", ".xls") + ((".pdf",) if include_pdf else ())
     out: list[SourceFile] = []
     for href in parser.hrefs:
         abs_url = urljoin(index_url, href)
@@ -154,7 +174,7 @@ def discover_links(index_url: str, year: int | None, retries: int = 4, timeout: 
             continue
 
         filename = _guess_filename_from_url(abs_url.split("?")[0], "downloaded_report")
-        if year and str(year) not in abs_url and str(year) not in filename:
+        if not matches_target_year(f"{abs_url} {filename}", year):
             continue
         out.append(SourceFile(url=abs_url, filename=filename))
     # de-duplicate by URL
@@ -173,7 +193,7 @@ def discover_report_pages(index_url: str, year: int | None, retries: int = 4, ti
         lower_url = abs_url.lower()
         if not any(k in lower_url for k in REPORT_PAGE_KEYWORDS):
             continue
-        if year and str(year) not in abs_url:
+        if not matches_target_year(abs_url, year):
             continue
         pages.append(abs_url)
 
@@ -286,6 +306,7 @@ def canonical_row(raw: dict[str, Any], column_map: dict[str, str], fallback_year
     applicants = coerce_number(get("drawApplicants"))
     tags = coerce_number(get("drawTags"))
     success = coerce_number(get("hunterSuccessRate"))
+    hunt_code = get("huntCode")
 
     y = coerce_number(get("year"))
     year = int(y) if y is not None else fallback_year
@@ -295,7 +316,7 @@ def canonical_row(raw: dict[str, Any], column_map: dict[str, str], fallback_year
     if year is None:
         return None
 
-    return {
+    out = {
         "year": int(year),
         "zone": str(zone).strip(),
         "species": str(species).strip(),
@@ -304,6 +325,9 @@ def canonical_row(raw: dict[str, Any], column_map: dict[str, str], fallback_year
         "drawTags": int(round(tags)),
         "hunterSuccessRate": round(float(success), 2),
     }
+    if hunt_code is not None and str(hunt_code).strip():
+        out["huntCode"] = str(hunt_code).strip()
+    return out
 
 
 def normalize_csv(path: Path, fallback_year: int | None, manual_map: dict[str, str]) -> list[dict[str, Any]]:
@@ -326,27 +350,243 @@ def normalize_csv(path: Path, fallback_year: int | None, manual_map: dict[str, s
     return rows
 
 
+def _extract_json_rows(payload: Any) -> list[dict[str, Any]]:
+    if isinstance(payload, list):
+        return [r for r in payload if isinstance(r, dict)]
+    if isinstance(payload, dict):
+        for key in ("rows", "data", "results", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [r for r in value if isinstance(r, dict)]
+    return []
+
+
+def _normalize_complete_draw_row(item: dict[str, Any], fallback_year: int | None) -> dict[str, Any] | None:
+    # Supports nested draw report rows shaped like:
+    # {year, species, huntCode, unitDescription, licenses, applicants:{huntTotal:{total}}, ...}
+    hunt_code = str(item.get("huntCode") or "").strip()
+    if not hunt_code:
+        return None
+
+    year_value = coerce_number(item.get("year"))
+    year = int(year_value) if year_value is not None else fallback_year
+    if year is None:
+        return None
+
+    species = str(item.get("species") or "").strip() or "Unknown"
+    unit_description = str(item.get("unitDescription") or "").strip()
+
+    applicants_block = item.get("applicants") if isinstance(item.get("applicants"), dict) else {}
+    hunt_total = applicants_block.get("huntTotal") if isinstance(applicants_block.get("huntTotal"), dict) else {}
+    applicant_total = coerce_number(hunt_total.get("total"))
+    if applicant_total is None:
+        applicant_total = coerce_number(item.get("applicants"))
+
+    licenses = coerce_number(item.get("licenses"))
+    alloc = item.get("allocation") if isinstance(item.get("allocation"), dict) else {}
+    by_res = alloc.get("licensesByResidency") if isinstance(alloc.get("licensesByResidency"), dict) else {}
+    alloc_total = coerce_number(by_res.get("total"))
+
+    tags = alloc_total if alloc_total is not None else licenses
+    applicants = applicant_total if applicant_total is not None else licenses
+    if applicants is None or tags is None:
+        return None
+
+    zone = unit_description or hunt_code
+    if unit_description:
+        unit_match = re.search(r"\bUnits?\s+([^:]+)", unit_description, flags=re.IGNORECASE)
+        if unit_match:
+            zone = unit_match.group(1).strip()
+
+    return {
+        "year": int(year),
+        "zone": zone,
+        "huntCode": hunt_code,
+        "species": species,
+        "weapon": "Any",
+        "drawApplicants": int(round(applicants)),
+        "drawTags": int(round(tags)),
+        "hunterSuccessRate": 0.0,
+    }
+
+
+def _normalize_harvest_row(item: dict[str, Any], fallback_year: int | None) -> dict[str, Any] | None:
+    # Supports harvest parser rows where draw applicants are unknown.
+    year_value = coerce_number(item.get("year"))
+    year = int(year_value) if year_value is not None else fallback_year
+    if year is None:
+        return None
+
+    zone = str(item.get("zone") or item.get("gmu") or "").strip()
+    species = str(item.get("species") or "").strip() or "Unknown"
+    weapon = str(item.get("weapon") or "").strip() or "Any"
+    success = coerce_number(item.get("hunterSuccessRate"))
+
+    if not zone or success is None:
+        return None
+
+    out: dict[str, Any] = {
+        "year": int(year),
+        "zone": zone,
+        "species": species,
+        "weapon": weapon,
+        "hunterSuccessRate": round(float(success), 2),
+    }
+
+    passthrough = [
+        "season",
+        "gmu",
+        "type",
+        "huntCode",
+        "huntDates",
+        "bagLimit",
+        "licensesSold",
+        "huntersReporting",
+        "percentReporting",
+        "estimatedBulls",
+        "estimatedCows",
+        "estimatedHarvestTotal",
+        "satisfactionRating",
+        "daysHunted",
+    ]
+    for key in passthrough:
+        value = item.get(key)
+        if value is not None and value != "":
+            out[key] = value
+
+    return out
+
+
 def normalize_json(path: Path, fallback_year: int | None, manual_map: dict[str, str]) -> list[dict[str, Any]]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
+    payload_rows = _extract_json_rows(payload)
+    if not payload_rows:
         return []
 
-    rows: list[dict[str, Any]] = []
-    if not payload:
-        return rows
+    # Dedicated handler for complete draw-report style JSON rows.
+    if all("huntCode" in row and "applicants" in row for row in payload_rows[: min(10, len(payload_rows))]):
+        out: list[dict[str, Any]] = []
+        for item in payload_rows:
+            c = _normalize_complete_draw_row(item, fallback_year)
+            if c:
+                out.append(c)
+        if out:
+            print(f"info: parsed {len(out)} rows from nested draw-report JSON {path.name}", file=sys.stderr)
+        return out
 
-    sample_headers = list(payload[0].keys()) if isinstance(payload[0], dict) else []
+    rows: list[dict[str, Any]] = []
+    sample_headers = list(payload_rows[0].keys()) if isinstance(payload_rows[0], dict) else []
     inferred = infer_column_map(sample_headers)
     column_map = {**inferred, **manual_map}
 
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
+    for item in payload_rows:
+        # Prefer harvest mapping when harvest-specific fields are present so we retain
+        # full harvest context instead of collapsing to draw-only canonical fields.
+        if "licensesSold" in item or "estimatedHarvestTotal" in item:
+            harvest_row = _normalize_harvest_row(item, fallback_year)
+            if harvest_row:
+                rows.append(harvest_row)
+                continue
+
         c = canonical_row(item, column_map, fallback_year)
         if c:
             rows.append(c)
+            continue
+
+        harvest_row = _normalize_harvest_row(item, fallback_year)
+        if harvest_row:
+            rows.append(harvest_row)
+
+    if rows and any("licensesSold" in r and "drawApplicants" not in r for r in rows):
+        print(f"info: parsed {len(rows)} rows from harvest-style JSON {path.name}", file=sys.stderr)
     return rows
 
+
+
+
+def _iter_pdf_rows(path: Path) -> list[dict[str, str]]:
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except Exception:
+        print(
+            "warning: pypdf not installed; skipping PDF parsing. Install with: python3 -m pip install pypdf",
+            file=sys.stderr,
+        )
+        return []
+
+    reader = PdfReader(str(path))
+    lines: list[str] = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        for line in text.splitlines():
+            line = line.strip()
+            if line:
+                lines.append(line)
+
+    if not lines:
+        return []
+
+    header_idx = -1
+    split_mode = ""
+    for idx, line in enumerate(lines):
+        lower = normalize_header(line)
+        if "," in line and any(k in lower for k in ["zone", "unit", "species", "applicants", "permits", "tags", "success"]):
+            header_idx = idx
+            split_mode = "comma"
+            break
+        if re.search(r"\s{2,}", line) and any(k in lower for k in ["zone", "unit", "species", "applicants", "permits", "tags", "success"]):
+            header_idx = idx
+            split_mode = "spaces"
+            break
+
+    if header_idx < 0:
+        return []
+
+    def split_line(line: str) -> list[str]:
+        if split_mode == "comma":
+            return next(csv.reader(io.StringIO(line)))
+        return [c.strip() for c in re.split(r"\s{2,}", line.strip())]
+
+    headers = split_line(lines[header_idx])
+    rows: list[dict[str, str]] = []
+    for line in lines[header_idx + 1 :]:
+        parts = split_line(line)
+        if len(parts) < max(2, len(headers) // 2):
+            continue
+        if len(parts) < len(headers):
+            parts += [""] * (len(headers) - len(parts))
+        if len(parts) > len(headers):
+            parts = parts[: len(headers) - 1] + [" ".join(parts[len(headers) - 1 :])]
+        row = {h: v for h, v in zip(headers, parts)}
+        rows.append(row)
+    return rows
+
+
+def normalize_pdf(path: Path, fallback_year: int | None, manual_map: dict[str, str]) -> list[dict[str, Any]]:
+    rows = _iter_pdf_rows(path)
+    if not rows:
+        print(f"skip {path.name}: unable to detect tabular PDF structure", file=sys.stderr)
+        return []
+
+    sample_headers = list(rows[0].keys())
+    inferred = infer_column_map(sample_headers)
+    column_map = {**inferred, **manual_map}
+    missing_core = [k for k in ["zone", "species", "weapon", "drawApplicants", "drawTags", "hunterSuccessRate"] if k not in column_map]
+    if missing_core:
+        print(f"skip {path.name}: PDF table missing mappings for {missing_core}", file=sys.stderr)
+        return []
+
+    out: list[dict[str, Any]] = []
+    for raw in rows:
+        c = canonical_row(raw, column_map, fallback_year)
+        if c:
+            out.append(c)
+
+    if out:
+        print(f"info: parsed {len(out)} rows from PDF {path.name}", file=sys.stderr)
+    else:
+        print(f"skip {path.name}: parsed PDF table but no canonical rows matched", file=sys.stderr)
+    return out
 
 def _xlsx_read_rows(path: Path) -> list[list[str]]:
     ns = {"a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
@@ -437,6 +677,7 @@ def normalize_draw_odds_xlsx(path: Path, fallback_year: int | None) -> list[dict
             {
                 "year": int(year),
                 "zone": zone,
+                "huntCode": hunt_code,
                 "species": current_species,
                 "weapon": "Any",
                 "drawApplicants": int(round(applicants)),
@@ -468,6 +709,43 @@ def detect_file_kind(path: Path) -> str:
     return "unknown"
 
 
+def load_manifest_sources(manifest_path: Path, year: int | None, include_pdf: bool = False) -> tuple[list[SourceFile], list[str]]:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("manifest must be a JSON object")
+
+    file_entries = payload.get("files")
+    if not isinstance(file_entries, list):
+        raise ValueError("manifest is missing a 'files' list")
+
+    report_pages = payload.get("reportPages")
+    if not isinstance(report_pages, list):
+        report_pages = []
+
+    files: list[SourceFile] = []
+    for idx, entry in enumerate(file_entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+        url = entry.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+
+        filename = entry.get("filename")
+        if not isinstance(filename, str) or not filename:
+            filename = Path(url.split("?")[0]).name or f"source_{idx}.dat"
+
+        if not matches_target_year(f"{url} {filename}", year):
+            continue
+
+        lower = f"{url} {filename}".lower()
+        if not include_pdf and ".pdf" in lower:
+            continue
+
+        files.append(SourceFile(url=url, filename=filename))
+
+    return files, [str(p) for p in report_pages if isinstance(p, str)]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Scrape and normalize NM hunt/draw data")
     parser.add_argument("--year", type=int, help="Target year for filtering links and fallback output year")
@@ -481,7 +759,14 @@ def main() -> int:
         action="store_true",
         help="Only discover/print report pages and source file links (no downloads, no normalization)",
     )
-    parser.add_argument("--manifest-out", help="Optional JSON output path for discovered report pages + links")
+    parser.add_argument(
+        "--manifest-out",
+        help="Optional JSON manifest path. With --discover-only it writes discovery output; otherwise, if this file exists it can be reused as manifest input.",
+    )
+    parser.add_argument(
+        "--manifest-in",
+        help="Optional JSON manifest input path (from --manifest-out). Uses listed files as download sources.",
+    )
     parser.add_argument("--raw-dir", default="data/raw", help="Folder for downloaded source files")
     parser.add_argument("--retries", type=int, default=4, help="Network retries per request (default: 4)")
     parser.add_argument("--timeout", type=int, default=60, help="Network timeout in seconds per request (default: 60)")
@@ -497,6 +782,11 @@ def main() -> int:
         help="Override mapping with canonical=source pairs, e.g. zone=Unit,species=Species,weapon=Weapon",
     )
     parser.add_argument(
+        "--include-pdf",
+        action="store_true",
+        help="Include PDF links during discovery/manifest replay downloads (default: skip PDFs).",
+    )
+    parser.add_argument(
         "--no-download",
         action="store_true",
         help="Skip scraping/download and only normalize files already in --raw-dir[/year]",
@@ -510,7 +800,17 @@ def main() -> int:
     if not args.no_download:
         files: list[SourceFile] = []
         report_pages: list[str] = []
-        if args.source_url:
+        if args.manifest_in:
+            manifest_path = Path(args.manifest_in)
+            files, report_pages = load_manifest_sources(manifest_path, args.year, include_pdf=args.include_pdf)
+            if not files:
+                print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
+        elif args.manifest_out and not args.discover_only and Path(args.manifest_out).exists():
+            manifest_path = Path(args.manifest_out)
+            files, report_pages = load_manifest_sources(manifest_path, args.year, include_pdf=args.include_pdf)
+            if not files:
+                print(f"warning: no downloadable files found in manifest {manifest_path}", file=sys.stderr)
+        elif args.source_url:
             files = [
                 SourceFile(url=u, filename=Path(u.split("?")[0]).name or f"source_{idx}.dat")
                 for idx, u in enumerate(args.source_url, start=1)
@@ -544,20 +844,46 @@ def main() -> int:
                     )
                     continue
                 try:
-                    files.extend(discover_links(page, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout)))
+                    files.extend(discover_links(page, args.year, include_pdf=args.include_pdf, retries=max(1, args.retries), timeout=max(10, args.timeout)))
                 except Exception as err:
                     print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
         else:
-            report_pages = [args.index_url]
+            report_pages = []
             try:
-                files = discover_links(args.index_url, args.year, retries=max(1, args.retries), timeout=max(10, args.timeout))
-            except Exception as err:
-                files = []
-                print(
-                    f"warning: failed to fetch/parse index page: {err}. "
-                    "Try --source-url for direct files or run with --no-download after saving files manually.",
-                    file=sys.stderr,
+                report_pages = discover_report_pages(
+                    args.index_url,
+                    args.year,
+                    retries=max(1, args.retries),
+                    timeout=max(10, args.timeout),
                 )
+            except Exception:
+                report_pages = []
+
+            if report_pages:
+                for page in report_pages:
+                    if looks_like_direct_download(page):
+                        files.append(
+                            SourceFile(
+                                url=page,
+                                filename=_guess_filename_from_url(page.split("?")[0], "downloaded_report"),
+                            )
+                        )
+                        continue
+                    try:
+                        files.extend(discover_links(page, args.year, include_pdf=args.include_pdf, retries=max(1, args.retries), timeout=max(10, args.timeout)))
+                    except Exception as err:
+                        print(f"warning: failed scraping report page {page}: {err}", file=sys.stderr)
+            else:
+                report_pages = [args.index_url]
+                try:
+                    files = discover_links(args.index_url, args.year, include_pdf=args.include_pdf, retries=max(1, args.retries), timeout=max(10, args.timeout))
+                except Exception as err:
+                    files = []
+                    print(
+                        f"warning: failed to fetch/parse index page: {err}. "
+                        "Try --source-url for direct files or run with --no-download after saving files manually.",
+                        file=sys.stderr,
+                    )
         # de-dup discovered file URLs
         file_unique: dict[str, SourceFile] = {f.url: f for f in files}
         files = sorted(file_unique.values(), key=lambda s: s.filename.lower())
@@ -595,6 +921,22 @@ def main() -> int:
             save_sources(files, raw_dir, retries=max(1, args.retries), timeout=max(10, args.timeout))
 
     all_files = sorted([p for p in raw_dir.iterdir() if p.is_file()]) if raw_dir.exists() else []
+    if args.year and not all_files and raw_base.exists() and raw_base != raw_dir:
+        # Compatibility fallback: if files are stored directly under raw dir (not raw/<year>),
+        # include files that match requested year tokens in filename.
+        year_token = str(args.year)
+        all_files = sorted(
+            [
+                p
+                for p in raw_base.iterdir()
+                if p.is_file() and matches_target_year(p.name, args.year) and year_token in p.name
+            ]
+        )
+        if all_files:
+            print(
+                f"info: using {len(all_files)} year-matching files from {raw_base} (fallback when {raw_dir} is empty)",
+                file=sys.stderr,
+            )
     classified: dict[str, list[Path]] = {"csv": [], "json": [], "xlsx": [], "pdf": [], "unknown": []}
     for p in all_files:
         classified.setdefault(detect_file_kind(p), []).append(p)
@@ -612,7 +954,7 @@ def main() -> int:
         )
     if pdf_files:
         print(
-            f"warning: found {len(pdf_files)} PDF files. Convert table data from PDF to CSV/JSON, then re-run with --no-download.",
+            f"info: found {len(pdf_files)} PDF files. Attempting PDF table parsing (requires pypdf for text extraction).",
             file=sys.stderr,
         )
     if unknown_files:
@@ -625,9 +967,11 @@ def main() -> int:
         normalized.extend(normalize_json(f, args.year, manual_map))
     for f in xlsx_files:
         normalized.extend(normalize_draw_odds_xlsx(f, args.year))
+    for f in pdf_files:
+        normalized.extend(normalize_pdf(f, args.year, manual_map))
 
     # de-dup rows
-    dedup_key = lambda r: (r["year"], r["zone"], r["species"], r["weapon"], r["drawApplicants"], r["drawTags"], r["hunterSuccessRate"])
+    dedup_key = lambda r: (r.get("year"), r.get("zone"), r.get("huntCode", ""), r.get("species"), r.get("weapon"), r.get("drawApplicants"), r.get("drawTags"), r.get("licensesSold"), r.get("hunterSuccessRate"))
     unique = {dedup_key(r): r for r in normalized}
     cleaned = sorted(unique.values(), key=lambda r: (r["year"], r["species"], r["weapon"], r["zone"]))
 

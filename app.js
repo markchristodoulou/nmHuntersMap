@@ -4,19 +4,35 @@ const weaponSelect = document.querySelector("#weaponSelect");
 const resultsTable = document.querySelector("#resultsTable");
 const zoneDetails = document.querySelector("#zoneDetails");
 
-const DATA_FILE = "./data/nm_hunt_data.sample.json";
+const DATA_FILES = [
+  "./data/nm_hunt_data.2026.json",
+  "./data/nm_hunt_data.2025.json",
+  "./data/nm_hunt_data.2024.json",
+  "./data/nm_hunt_data.merged.json",
+  "./data/nm_hunt_data.sample.json",
+];
 
 let allRows = [];
 let zoneFeatures = [];
-let selectedZone = null;
+let selectedRowId = null;
 let map;
 let geoLayer;
 
-const pct = (value) => `${value.toFixed(1)}%`;
+const pct = (value) => (Number.isFinite(value) ? `${value.toFixed(1)}%` : "N/A");
+const fmtNum = (value) => (Number.isFinite(value) ? String(value) : "N/A");
+
+function rowId(row) {
+  return `${row.zone}::${row.huntCode ?? ""}`;
+}
+
+function rowScore(row) {
+  return Number.isFinite(row.combined) ? row.combined : row.hunterSuccessRate;
+}
 
 function calcMetrics(row) {
-  const drawOdds = row.drawApplicants > 0 ? (row.drawTags / row.drawApplicants) * 100 : 0;
-  const combined = (drawOdds * row.hunterSuccessRate) / 100;
+  const hasDrawInputs = Number.isFinite(row.drawApplicants) && row.drawApplicants > 0 && Number.isFinite(row.drawTags);
+  const drawOdds = hasDrawInputs ? (row.drawTags / row.drawApplicants) * 100 : null;
+  const combined = hasDrawInputs ? (drawOdds * row.hunterSuccessRate) / 100 : null;
   return { drawOdds, combined };
 }
 
@@ -27,8 +43,8 @@ function getFilteredRows() {
 
   return allRows
     .filter((row) => row.year === year && row.species === species && row.weapon === weapon)
-    .map((row) => ({ ...row, ...calcMetrics(row) }))
-    .sort((a, b) => b.combined - a.combined);
+    .map((row) => ({ ...row, huntCode: row.huntCode ?? "", ...calcMetrics(row) }))
+    .sort((a, b) => rowScore(b) - rowScore(a));
 }
 
 function fillSelect(select, values) {
@@ -45,17 +61,19 @@ function renderDetails(row) {
 
   zoneDetails.innerHTML = `
     <p><strong>Zone:</strong> ${row.zone}</p>
-    <p><strong>Applicants:</strong> ${row.drawApplicants}</p>
-    <p><strong>Tags:</strong> ${row.drawTags}</p>
+    <p><strong>Hunt Code:</strong> ${row.huntCode || "N/A"}</p>
+    <p><strong>Licenses Sold / Winners:</strong> ${fmtNum(row.licensesSold)}</p>
+    <p><strong>Applicants:</strong> ${fmtNum(row.drawApplicants)}</p>
+    <p><strong>Tags:</strong> ${fmtNum(row.drawTags)}</p>
     <p><strong>Draw Odds:</strong> ${pct(row.drawOdds)}</p>
     <p><strong>Hunt Success:</strong> ${pct(row.hunterSuccessRate)}</p>
     <p><strong>Combined Chance:</strong> ${pct(row.combined)}</p>
   `;
 }
 
-function colorForCombined(combined, maxCombined) {
-  if (!maxCombined) return "#dbeafe";
-  const ratio = Math.max(0, Math.min(1, combined / maxCombined));
+function colorForScore(score, maxScore) {
+  if (!maxScore || !Number.isFinite(score)) return "#dbeafe";
+  const ratio = Math.max(0, Math.min(1, score / maxScore));
   if (ratio >= 0.85) return "#1d4ed8";
   if (ratio >= 0.65) return "#2563eb";
   if (ratio >= 0.45) return "#3b82f6";
@@ -67,10 +85,12 @@ function renderTable(rows) {
   resultsTable.innerHTML = rows
     .map(
       (row) => `
-      <tr data-zone="${row.zone}" class="${row.zone === selectedZone ? "active" : ""}">
+      <tr data-row-id="${rowId(row)}" class="${rowId(row) === selectedRowId ? "active" : ""}">
         <td>${row.zone}</td>
-        <td>${row.drawApplicants}</td>
-        <td>${row.drawTags}</td>
+        <td>${row.huntCode || "-"}</td>
+        <td>${fmtNum(row.licensesSold)}</td>
+        <td>${fmtNum(row.drawApplicants)}</td>
+        <td>${fmtNum(row.drawTags)}</td>
         <td>${pct(row.drawOdds)}</td>
         <td>${pct(row.hunterSuccessRate)}</td>
         <td>${pct(row.combined)}</td>
@@ -81,15 +101,20 @@ function renderTable(rows) {
 
   resultsTable.querySelectorAll("tr").forEach((tr) => {
     tr.addEventListener("click", () => {
-      selectedZone = tr.dataset.zone;
+      selectedRowId = tr.dataset.rowId;
       refresh();
     });
   });
 }
 
 function renderMap(rows) {
-  const byZone = new Map(rows.map((row) => [row.zone, row]));
-  const maxCombined = Math.max(...rows.map((row) => row.combined), 0);
+  const byZone = new Map();
+  for (const row of rows) {
+    if (!byZone.has(row.zone) || rowScore(byZone.get(row.zone)) < rowScore(row)) {
+      byZone.set(row.zone, row);
+    }
+  }
+  const maxScore = Math.max(...rows.map((row) => rowScore(row)), 0);
 
   if (geoLayer) {
     geoLayer.remove();
@@ -100,9 +125,9 @@ function renderMap(rows) {
       const zoneId = feature.properties.zone;
       const row = byZone.get(zoneId);
       return {
-        color: row && zoneId === selectedZone ? "#0f172a" : "#1e3a8a",
-        weight: row && zoneId === selectedZone ? 3 : 1.5,
-        fillColor: row ? colorForCombined(row.combined, maxCombined) : "#e5e7eb",
+        color: row && rowId(row) === selectedRowId ? "#0f172a" : "#1e3a8a",
+        weight: row && rowId(row) === selectedRowId ? 3 : 1.5,
+        fillColor: row ? colorForScore(rowScore(row), maxScore) : "#e5e7eb",
         fillOpacity: row ? 0.72 : 0.3,
       };
     },
@@ -110,12 +135,12 @@ function renderMap(rows) {
       const zoneId = feature.properties.zone;
       const row = byZone.get(zoneId);
       const tooltip = row
-        ? `<div class="gmu-tooltip"><strong>GMU ${zoneId}</strong><br/>Combined: ${pct(row.combined)}<br/>Draw: ${pct(row.drawOdds)}<br/>Success: ${pct(row.hunterSuccessRate)}</div>`
+        ? `<div class="gmu-tooltip"><strong>GMU ${zoneId}</strong><br/>Score: ${pct(rowScore(row))}<br/>Draw: ${pct(row.drawOdds)}<br/>Success: ${pct(row.hunterSuccessRate)}</div>`
         : `<div class="gmu-tooltip"><strong>GMU ${zoneId}</strong><br/>No data for selected filters.</div>`;
 
       layer.bindTooltip(tooltip);
       layer.on("click", () => {
-        selectedZone = zoneId;
+        selectedRowId = row ? rowId(row) : null;
         refresh();
       });
     },
@@ -125,18 +150,18 @@ function renderMap(rows) {
 function refresh() {
   const rows = getFilteredRows();
 
-  if (!selectedZone && rows.length) {
-    selectedZone = rows[0].zone;
+  if (!selectedRowId && rows.length) {
+    selectedRowId = rowId(rows[0]);
   }
 
-  if (selectedZone && !rows.some((row) => row.zone === selectedZone)) {
-    selectedZone = rows[0]?.zone ?? null;
+  if (selectedRowId && !rows.some((row) => rowId(row) === selectedRowId)) {
+    selectedRowId = rows[0] ? rowId(rows[0]) : null;
   }
 
   renderTable(rows);
   renderMap(rows);
 
-  const selectedRow = rows.find((row) => row.zone === selectedZone);
+  const selectedRow = rows.find((row) => rowId(row) === selectedRowId);
   renderDetails(selectedRow);
 }
 
@@ -145,7 +170,7 @@ async function initMap() {
 
   L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
     maxZoom: 12,
-    attribution: '&copy; OpenStreetMap contributors',
+    attribution: "&copy; OpenStreetMap contributors",
   }).addTo(map);
 
   const geoResponse = await fetch("./data/nm_gmu_boundaries.geojson");
@@ -157,9 +182,29 @@ async function initMap() {
   initialLayer.remove();
 }
 
+async function loadRows() {
+  for (const path of DATA_FILES) {
+    try {
+      const response = await fetch(path);
+      if (!response.ok) continue;
+      const rows = await response.json();
+      if (Array.isArray(rows) && rows.length) {
+        console.info(`Loaded data from ${path} (${rows.length} rows)`);
+        return rows;
+      }
+    } catch {
+      // Try next candidate file.
+    }
+  }
+  return [];
+}
+
 async function init() {
-  const response = await fetch(DATA_FILE);
-  allRows = await response.json();
+  allRows = await loadRows();
+  if (!allRows.length) {
+    zoneDetails.innerHTML = "No data rows were found. Add a file like data/nm_hunt_data.2024.json.";
+    return;
+  }
 
   const years = [...new Set(allRows.map((row) => row.year))].sort((a, b) => b - a);
   const species = [...new Set(allRows.map((row) => row.species))].sort();
