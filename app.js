@@ -8,7 +8,7 @@ const DATA_FILE = "./data/nm_hunt_data.sample.json";
 
 let allRows = [];
 let zoneFeatures = [];
-let selectedZone = null;
+let selectedRowId = null;
 let map;
 let geoLayer;
 
@@ -20,6 +20,10 @@ function calcMetrics(row) {
   return { drawOdds, combined };
 }
 
+function rowId(row) {
+  return `${row.zone}::${row.huntCode ?? ""}`;
+}
+
 function getFilteredRows() {
   const year = Number(yearSelect.value);
   const species = speciesSelect.value;
@@ -27,7 +31,7 @@ function getFilteredRows() {
 
   return allRows
     .filter((row) => row.year === year && row.species === species && row.weapon === weapon)
-    .map((row) => ({ ...row, ...calcMetrics(row) }))
+    .map((row) => ({ ...row, huntCode: row.huntCode ?? "", ...calcMetrics(row) }))
     .sort((a, b) => b.combined - a.combined);
 }
 
@@ -45,6 +49,7 @@ function renderDetails(row) {
 
   zoneDetails.innerHTML = `
     <p><strong>Zone:</strong> ${row.zone}</p>
+    <p><strong>Hunt Code:</strong> ${row.huntCode || "N/A"}</p>
     <p><strong>Applicants:</strong> ${row.drawApplicants}</p>
     <p><strong>Tags:</strong> ${row.drawTags}</p>
     <p><strong>Draw Odds:</strong> ${pct(row.drawOdds)}</p>
@@ -67,8 +72,9 @@ function renderTable(rows) {
   resultsTable.innerHTML = rows
     .map(
       (row) => `
-      <tr data-zone="${row.zone}" class="${row.zone === selectedZone ? "active" : ""}">
+      <tr data-row-id="${rowId(row)}" class="${rowId(row) === selectedRowId ? "active" : ""}">
         <td>${row.zone}</td>
+        <td>${row.huntCode || "-"}</td>
         <td>${row.drawApplicants}</td>
         <td>${row.drawTags}</td>
         <td>${pct(row.drawOdds)}</td>
@@ -81,14 +87,19 @@ function renderTable(rows) {
 
   resultsTable.querySelectorAll("tr").forEach((tr) => {
     tr.addEventListener("click", () => {
-      selectedZone = tr.dataset.zone;
+      selectedRowId = tr.dataset.rowId;
       refresh();
     });
   });
 }
 
 function renderMap(rows) {
-  const byZone = new Map(rows.map((row) => [row.zone, row]));
+  const byZone = new Map();
+  for (const row of rows) {
+    if (!byZone.has(row.zone) || byZone.get(row.zone).combined < row.combined) {
+      byZone.set(row.zone, row);
+    }
+  }
   const maxCombined = Math.max(...rows.map((row) => row.combined), 0);
 
   if (geoLayer) {
@@ -100,8 +111,8 @@ function renderMap(rows) {
       const zoneId = feature.properties.zone;
       const row = byZone.get(zoneId);
       return {
-        color: row && zoneId === selectedZone ? "#0f172a" : "#1e3a8a",
-        weight: row && zoneId === selectedZone ? 3 : 1.5,
+        color: row && rowId(row) === selectedRowId ? "#0f172a" : "#1e3a8a",
+        weight: row && rowId(row) === selectedRowId ? 3 : 1.5,
         fillColor: row ? colorForCombined(row.combined, maxCombined) : "#e5e7eb",
         fillOpacity: row ? 0.72 : 0.3,
       };
@@ -115,7 +126,7 @@ function renderMap(rows) {
 
       layer.bindTooltip(tooltip);
       layer.on("click", () => {
-        selectedZone = zoneId;
+        selectedRowId = row ? rowId(row) : null;
         refresh();
       });
     },
@@ -125,18 +136,18 @@ function renderMap(rows) {
 function refresh() {
   const rows = getFilteredRows();
 
-  if (!selectedZone && rows.length) {
-    selectedZone = rows[0].zone;
+  if (!selectedRowId && rows.length) {
+    selectedRowId = rowId(rows[0]);
   }
 
-  if (selectedZone && !rows.some((row) => row.zone === selectedZone)) {
-    selectedZone = rows[0]?.zone ?? null;
+  if (selectedRowId && !rows.some((row) => rowId(row) === selectedRowId)) {
+    selectedRowId = rows[0] ? rowId(rows[0]) : null;
   }
 
   renderTable(rows);
   renderMap(rows);
 
-  const selectedRow = rows.find((row) => row.zone === selectedZone);
+  const selectedRow = rows.find((row) => rowId(row) === selectedRowId);
   renderDetails(selectedRow);
 }
 
