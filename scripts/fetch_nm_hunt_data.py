@@ -62,6 +62,10 @@ COLUMN_SYNONYMS = {
     "drawTags": ["draw tags", "tags", "licenses", "permits", "quota", "available licenses"],
     "hunterSuccessRate": [
         "hunter success rate",
+        "hunt success",
+        "hunt success rate",
+        "hunt_success",
+        "hunt_success_rate",
         "success rate",
         "harvest success",
         "success %",
@@ -306,6 +310,13 @@ def canonical_row(raw: dict[str, Any], column_map: dict[str, str], fallback_year
     applicants = coerce_number(get("drawApplicants"))
     tags = coerce_number(get("drawTags"))
     success = coerce_number(get("hunterSuccessRate"))
+    if success is None:
+        # Some report exports use a non-canonical key even when no explicit
+        # column map was provided. Keep these as a fallback so hunt success is
+        # retained in normalized output.
+        success = coerce_number(raw.get("huntSuccessRate"))
+    if success is None:
+        success = coerce_number(raw.get("huntSuccess"))
     hunt_code = get("huntCode")
 
     y = coerce_number(get("year"))
